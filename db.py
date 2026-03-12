@@ -1,27 +1,35 @@
-import os
 import json
 import logging
 from datetime import datetime
 import psycopg2
 import psycopg2.extras
+from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.environ.get('DATABASE_URL', '')
+# ── Connection ──
 
 def get_conn():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
+    if not DATABASE_URL:
+        raise RuntimeError('DATABASE_URL is not set')
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
 
 def init_db():
-    """Tables are created via Supabase migration — this just verifies connectivity."""
+    """Verify DB connectivity on startup. Warns but does NOT crash the app."""
     try:
         conn = get_conn()
         conn.close()
-        logger.info('Supabase DB connected OK')
+        logger.info('✓ Supabase DB connected OK')
+        return True
     except Exception as e:
-        logger.error(f'DB connection failed: {e}')
-        raise
+        logger.error(f'✗ DB connection failed: {e}')
+        logger.error('  → Check DATABASE_URL env var')
+        logger.error('  → Must use session pooler for Render (IPv4):')
+        logger.error('  → postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres')
+        return False  # Never raise — app still boots and serves dashboard
+
+# ── Posts ──
 
 def upsert_post(post: dict):
     conn = get_conn()
@@ -48,43 +56,6 @@ def upsert_post(post: dict):
     finally:
         conn.close()
 
-def get_unnotified_posts():
-    conn = get_conn()
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
-            c.execute('SELECT * FROM posts WHERE notified=0 ORDER BY created_utc DESC')
-            return [dict(r) for r in c.fetchall()]
-    finally:
-        conn.close()
-
-def mark_notified(post_id: str):
-    conn = get_conn()
-    try:
-        with conn:
-            with conn.cursor() as c:
-                c.execute('UPDATE posts SET notified=1 WHERE id=%s', (post_id,))
-    finally:
-        conn.close()
-
-def mark_contacted(post_id: str):
-    conn = get_conn()
-    now = int(datetime.utcnow().timestamp())
-    try:
-        with conn:
-            with conn.cursor() as c:
-                c.execute('UPDATE posts SET contacted=1, contacted_at=%s WHERE id=%s', (now, post_id))
-                c.execute('INSERT INTO activity_log (timestamp, action, post_id) VALUES (%s,%s,%s)', (now, 'contacted', post_id))
-    finally:
-        conn.close()
-
-def unmark_contacted(post_id: str):
-    conn = get_conn()
-    try:
-        with conn:
-            with conn.cursor() as c:
-                c.execute('UPDATE posts SET contacted=0, contacted_at=NULL WHERE id=%s', (post_id,))
-    finally:
-        conn.close()
 
 def get_posts(limit=200, offset=0, post_type=None, hide_contacted=False):
     conn = get_conn()
@@ -103,6 +74,7 @@ def get_posts(limit=200, offset=0, post_type=None, hide_contacted=False):
             return [dict(r) for r in c.fetchall()]
     finally:
         conn.close()
+
 
 def get_stats():
     conn = get_conn()
@@ -145,6 +117,50 @@ def get_stats():
     finally:
         conn.close()
 
+
+def get_unnotified_posts():
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            c.execute('SELECT * FROM posts WHERE notified=0 ORDER BY created_utc DESC')
+            return [dict(r) for r in c.fetchall()]
+    finally:
+        conn.close()
+
+
+def mark_notified(post_id: str):
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor() as c:
+                c.execute('UPDATE posts SET notified=1 WHERE id=%s', (post_id,))
+    finally:
+        conn.close()
+
+
+def mark_contacted(post_id: str):
+    conn = get_conn()
+    now = int(datetime.utcnow().timestamp())
+    try:
+        with conn:
+            with conn.cursor() as c:
+                c.execute('UPDATE posts SET contacted=1, contacted_at=%s WHERE id=%s', (now, post_id))
+                c.execute('INSERT INTO activity_log (timestamp, action, post_id) VALUES (%s,%s,%s)', (now, 'contacted', post_id))
+    finally:
+        conn.close()
+
+
+def unmark_contacted(post_id: str):
+    conn = get_conn()
+    try:
+        with conn:
+            with conn.cursor() as c:
+                c.execute('UPDATE posts SET contacted=0, contacted_at=NULL WHERE id=%s', (post_id,))
+    finally:
+        conn.close()
+
+# ── Settings ──
+
 def get_setting(key, default=None):
     conn = get_conn()
     try:
@@ -155,6 +171,7 @@ def get_setting(key, default=None):
     finally:
         conn.close()
 
+
 def set_setting(key, value):
     conn = get_conn()
     try:
@@ -164,6 +181,8 @@ def set_setting(key, value):
                           (key, str(value)))
     finally:
         conn.close()
+
+# ── Subreddits ──
 
 DEFAULT_SUBS = [
     {'name': 'ConcertTicketsIndia',   'priority': 'high'},
@@ -180,6 +199,7 @@ DEFAULT_SUBS = [
     {'name': 'Tickets',               'priority': 'low'},
 ]
 
+
 def get_subreddits():
     val = get_setting('subreddits_v2')
     if val:
@@ -192,11 +212,15 @@ def get_subreddits():
         return migrated
     return DEFAULT_SUBS
 
+
 def save_subreddits(subs: list):
     set_setting('subreddits_v2', json.dumps(subs))
 
+
 def get_subreddit_names():
     return [s['name'] for s in get_subreddits()]
+
+# ── Events / Keywords ──
 
 def get_event_keywords():
     conn = get_conn()
@@ -206,6 +230,7 @@ def get_event_keywords():
             return [dict(r) for r in c.fetchall()]
     finally:
         conn.close()
+
 
 def add_event_keywords(names: list):
     conn = get_conn()
@@ -220,6 +245,7 @@ def add_event_keywords(names: list):
     finally:
         conn.close()
 
+
 def delete_event_keyword(kid: int):
     conn = get_conn()
     try:
@@ -228,6 +254,7 @@ def delete_event_keyword(kid: int):
                 c.execute('DELETE FROM event_keywords WHERE id=%s', (kid,))
     finally:
         conn.close()
+
 
 def get_all_extra_keywords():
     events = get_event_keywords()
