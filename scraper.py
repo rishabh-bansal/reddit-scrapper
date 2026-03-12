@@ -103,6 +103,7 @@ def classify_keyword(post: dict) -> str:
 
 
 def classify_with_ai(posts: list) -> dict:
+    import json, re
     if not ANTHROPIC_API_KEY or not posts:
         return {}
     batch = posts[:20]
@@ -115,8 +116,8 @@ def classify_with_ai(posts: list) -> dict:
         'Be strict: "Why are Indian concerts chaotic?" = skip. "Selling phone cooler" = skip. '
         '"WTS Calvin Harris ticket" = sell. "Need 2 Diljit tickets" = buy.\n\n'
         'Posts:\n' +
-        str([{'id': p['id'], 'text': (p['title'] + ' ' + p.get('body', ''))[:200]} for p in batch]) +
-        '\n\nReply ONLY with JSON: {"post_id": "buy"|"sell"|"skip", ...}'
+        json.dumps([{'id': p['id'], 'text': (p['title'] + ' ' + p.get('body', ''))[:200]} for p in batch]) +
+        '\n\nReply ONLY with a valid JSON object like: {"abc123": "buy", "xyz456": "skip"}'
     )
     try:
         res = requests.post(
@@ -131,13 +132,21 @@ def classify_with_ai(posts: list) -> dict:
                 'max_tokens': 500,
                 'messages': [{'role': 'user', 'content': prompt}]
             },
-            timeout=15
+            timeout=20
         )
-        import json, re
-        text = res.json()['content'][0]['text']
-        match = re.search(r'\{.*\}', text, re.DOTALL)
+        rdata = res.json()
+        # Handle API errors gracefully
+        if res.status_code != 200:
+            logger.warning(f'AI API error {res.status_code}: {rdata.get("error", {}).get("message", rdata)}')
+            return {}
+        if 'content' not in rdata or not rdata['content']:
+            logger.warning(f'AI response missing content: {rdata}')
+            return {}
+        text = rdata['content'][0]['text']
+        match = re.search(r'\{.*?\}', text, re.DOTALL)
         if match:
             return json.loads(match.group())
+        logger.warning(f'AI response had no JSON: {text[:200]}')
     except Exception as e:
         logger.warning(f'AI classification failed: {e}')
     return {}
@@ -164,6 +173,7 @@ def fetch_subreddit(subreddit: str, extra_keywords: list) -> list:
         data = res.json()
         posts = [c['data'] for c in data.get('data', {}).get('children', [])]
         ticket_posts = [p for p in posts if is_ticket_post(p, subreddit, extra_keywords)]
+        logger.info(f'r/{subreddit}: {len(posts)} raw posts, {len(ticket_posts)} matched ticket filter')
 
         unclear = []
         result = []

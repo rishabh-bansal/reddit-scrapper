@@ -147,6 +147,18 @@ def status():
 def ping():
     return 'pong'
 
+@app.route('/api/debug/scrape')
+def debug_scrape():
+    """Test-scrape a single sub and return raw results without storing — for diagnosis."""
+    sub = request.args.get('sub', 'ConcertTicketsIndia')
+    extra = db.get_all_extra_keywords()
+    posts = scraper.fetch_subreddit(sub, extra)
+    return jsonify({
+        'subreddit': sub,
+        'found': len(posts),
+        'posts': [{'id': p['id'], 'title': p['title'], 'type': p['post_type']} for p in posts[:10]]
+    })
+
 # ── Scraper State ──
 
 # ONE subreddit every 3 minutes = safe and sustainable
