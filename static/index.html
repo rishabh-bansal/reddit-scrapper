@@ -178,7 +178,7 @@ header {
 .bar-chart { display: flex; flex-direction: column; gap: 7px; }
 .bar-row { display: flex; flex-direction: column; gap: 3px; }
 .bar-label-row { display: flex; justify-content: space-between; }
-.bar-name { font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; color: var(--text); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-name { font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; color: var(--text); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-num { font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; color: var(--muted); }
 .bar-track { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
 .bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.6s ease; }
@@ -321,7 +321,7 @@ header {
   <div class="header-status-row">
     <div class="status-pill loading" id="statusReddit"><div class="dot"></div><span>Reddit</span></div>
     <div class="status-pill loading" id="statusTelegram"><div class="dot"></div><span>Telegram</span></div>
-    <div class="status-pill loading" id="statusClaude"><div class="dot"></div><span>Claude AI</span></div>
+    <div class="status-pill loading" id="statusClaude"><div class="dot"></div><span>Gemini AI</span></div>
     <div class="status-pill loading" id="statusDB"><div class="dot"></div><span>DB</span></div>
   </div>
   <div class="header-right">
@@ -520,7 +520,7 @@ header {
         <div class="mobile-status-val"><div class="mobile-status-dot loading" id="mDotTelegram"></div><span id="mLabelTelegram">Checking...</span></div>
       </div>
       <div class="mobile-status-item">
-        <span class="mobile-status-label">Claude AI</span>
+        <span class="mobile-status-label">Gemini AI</span>
         <div class="mobile-status-val"><div class="mobile-status-dot loading" id="mDotClaude"></div><span id="mLabelClaude">Checking...</span></div>
       </div>
       <div class="mobile-status-item">
@@ -576,7 +576,7 @@ function applyStatus(s) {
   };
   setPill('statusReddit', s.reddit?.ok, s.reddit?.ok ? 'Reddit ✓' : 'Reddit ✗');
   setPill('statusTelegram', s.telegram?.ok, s.telegram?.ok ? `@${s.telegram.bot_name} ✓` : (s.telegram?.error?.includes('not set') ? 'Telegram — no token' : 'Telegram ✗'));
-  setPill('statusClaude', s.claude?.ok, s.claude?.ok ? 'Claude AI ✓' : 'Claude AI — no key');
+  setPill('statusClaude', s.claude?.ok, s.claude?.ok ? 'Gemini AI ✓' : 'Gemini AI — no key');
   setPill('statusDB', s.database?.ok, s.database?.ok ? `DB ✓` : 'DB ✗');
 
   // Mobile status dots
@@ -884,7 +884,6 @@ function renderPosts() {
   if (!allPosts.length) { list.innerHTML = ''; empty.style.display = 'block'; return; }
   empty.style.display = 'none';
   list.innerHTML = allPosts.map((p, i) => {
-    const dm = `https://www.reddit.com/message/compose/?to=${encodeURIComponent(p.author)}&subject=Ticket%20enquiry&message=`;
     const view = `https://reddit.com${p.permalink}`;
     const preview = (p.body || '').slice(0, 120);
     return `
@@ -901,7 +900,7 @@ function renderPosts() {
           <span class="meta-chip">u/${esc(p.author)}</span>
           <span class="meta-chip">↑${p.ups}</span>
           <span class="meta-chip">💬${p.num_comments}</span>
-          <a class="dm-btn" href="${dm}" target="_blank" onclick="contactPost('${p.id}')">✉ DM</a>
+          <a class="dm-btn" href="${buildDmUrl(p)}" target="_blank" onclick="contactPost('${p.id}')">✉ DM</a>
           <a class="dm-btn view" href="${view}" target="_blank">View</a>
         </div>
       </div>
@@ -1040,6 +1039,77 @@ function playPing() {
 }
 
 function setLoading(show) { document.getElementById('loadingWrap').style.display = show ? 'block' : 'none'; }
+
+// ── DM PRE-FILL ──
+function buildDmUrl(post) {
+  const base = `https://www.reddit.com/message/compose/?to=${encodeURIComponent(post.author)}`;
+  const subject = encodeURIComponent('Ticket enquiry');
+  const msg = buildDmMessage(post);
+  return `${base}&subject=${subject}&message=${encodeURIComponent(msg)}`;
+}
+
+function buildDmMessage(post) {
+  const title = (post.title || '').toLowerCase();
+  const body = (post.body || '').toLowerCase();
+  const text = title + ' ' + body;
+  const type = post.post_type;
+
+  if (type === 'sell') {
+    // They're selling — pitch them reticket as a safe platform
+    return `Yo! Saw your post — if you're looking for a legit buyer, drop your listing on app.reticket.in 🎟️
+
+We're basically India's answer to Viagogo but actually built for Indian users (so we get the scam problem lol). Here's the deal:
+- 400+ community members actively looking for tickets
+- Free to list, no commission
+- We handle delivery + KYC so both sides are protected
+- Buyers on our platform are verified, no timewasters
+
+Would love to have you on there. Happy to answer any Qs!`;
+  }
+
+  // They're buying — figure out what they want and pitch our inventory
+  // Extract hints from their post
+  const zones = [];
+  if (text.includes('pit') || text.includes('fan pit') || text.includes('fanpit')) zones.push('Pit/Fan Pit');
+  if (text.includes('silver')) zones.push('Silver');
+  if (text.includes('gold')) zones.push('Gold');
+  if (text.includes('platinum')) zones.push('Platinum');
+  if (text.includes('vip')) zones.push('VIP');
+  if (text.includes('bronze')) zones.push('Bronze');
+
+  const quantities = text.match(/([1-9])\s*ticket/);
+  const qty = quantities ? quantities[1] : null;
+
+  // Build a casual, helpful opener
+  let opener = `Yo! Saw you're looking for tickets`;
+  if (qty) opener += ` (${qty} ticket${parseInt(qty) > 1 ? 's' : ''})`;
+  if (zones.length) opener += ` — ${zones.join('/')} zone`;
+  opener += '. We might have what you need! 🎟️';
+
+  // Build the missing info ask — only ask for what's not already in their post
+  const missing = [];
+  if (!zones.length) missing.push('zone/category (Pit, Silver, Gold etc.)');
+  if (!qty) missing.push('how many tickets');
+  if (!text.includes('delhi') && !text.includes('mumbai') && !text.includes('bangalore') && !text.includes('pune') && !text.includes('hyderabad')) {
+    missing.push('which city');
+  }
+
+  let msg = opener + '
+
+';
+  msg += `We sell below BookMyShow/District prices — legit tickets, no scams.
+
+`;
+
+  if (missing.length) {
+    msg += `Quick Q before we confirm: what's your preferred ${missing.join(' and ')}?
+
+`;
+  }
+
+  msg += `Let me know and I'll check what we've got!`;
+  return msg;
+}
 
 // ── HELPERS ──
 function timeAgo(utc) {
