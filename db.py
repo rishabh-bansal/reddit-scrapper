@@ -40,14 +40,37 @@ def _get_pool():
 
 
 def get_conn():
-    """Get a connection from the pool. Caller MUST return it with put_conn()."""
-    return _get_pool().getconn()
+    """Get a live connection from the pool. Tests it first; replaces if dead."""
+    p = _get_pool()
+    conn = p.getconn()
+    try:
+        conn.cursor().execute('SELECT 1')
+        return conn
+    except Exception:
+        # Connection is stale/dead — discard and open a fresh one
+        try:
+            p.putconn(conn, close=True)
+        except Exception:
+            pass
+        return psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=10,
+            sslmode='require',
+            sslcompression=0,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
 
 
 def put_conn(conn):
-    """Return a connection to the pool."""
+    """Return a connection to the pool. Discards broken connections."""
     try:
-        _get_pool().putconn(conn)
+        if conn.closed:
+            _get_pool().putconn(conn, close=True)
+        else:
+            _get_pool().putconn(conn)
     except Exception:
         pass
 

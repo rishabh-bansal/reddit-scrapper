@@ -127,7 +127,7 @@ def fetch_subreddit(subreddit: str, extra_keywords: list, fast_mode: bool = Fals
     """
     3-stage pipeline:
       Stage 1 — broad keyword filter (local, fast)
-      Stage 2 — Gemini AI classification (batched 20/call)
+      Stage 2 — Groq AI classification (batched 10/call)
       Stage 3 — keep buy/sell, discard skip
 
     fast_mode=True: up to 3 pages (first boot)

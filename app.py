@@ -152,7 +152,7 @@ def manual_scrape():
 
 @app.route('/api/reclassify', methods=['POST'])
 def reclassify():
-    """Re-run Gemini on all 'unclear' posts in DB to clean up keyword-fallback classifications."""
+    """Re-run Groq AI on all 'unclear' posts in DB to clean up keyword-fallback classifications."""
     def _bg():
         try:
             posts = db.get_posts(limit=500, post_type='unclear')
@@ -244,9 +244,9 @@ def status():
                 'ok': bool(config.TELEGRAM_TOKEN),
                 'chat_configured': bool(config.TELEGRAM_CHAT_ID),
             },
-            'gemini': {
-                'ok': bool(config.GEMINI_API_KEY),
-                'model': 'gemini-2.5-flash',
+            'claude': {
+                'ok': bool(config.GROQ_API_KEY),
+                'model': 'llama-3.1-8b-instant (Groq)',
             },
             'scraper': {
                 'first_boot_done': scheduler.state.get('first_boot_done', True),

@@ -3,12 +3,15 @@ import re
 import time
 import logging
 import requests
-from config import GEMINI_API_KEY
+from config import GROQ_API_KEY
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = 'gemini-2.5-flash'
-GEMINI_URL = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
+# Groq free tier: llama-3.1-8b-instant
+# Limits: ~30 req/min, 500K tokens/day
+# We sleep 2s between batches → max 30 req/min, well within limits
+GROQ_MODEL = 'llama-3.1-8b-instant'
+GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
 
 BUY_KEYWORDS = [
     'wtb', 'want to buy', 'looking to buy', 'looking for', 'need ticket', 'need tickets',
@@ -30,68 +33,62 @@ SELL_KEYWORDS = [
     'have 3 tickets', 'selling two', 'selling one', 'dm for price', 'price negotiable',
 ]
 
-# These are real regex patterns — used with re.search()
+# Real regex patterns — used with re.search()
 SKIP_PATTERNS = [
-    # Event planning / organisation
     r'planning an? event', r'organizing an? event', r'hosting an? event',
     r'looking for venue', r'suggestions for.*event', r'need recommendations for',
     r'help me plan', r'how to organize', r'event management', r'event planning',
     r'budget place', r'good place for', r'vehicle suggestions',
-    # Non-ticket items for sale
     r'selling.*\bmonitor\b', r'selling.*\blaptop\b', r'selling.*\bphone\b',
     r'selling.*\bcamera\b', r'selling.*\bfurniture\b', r'selling.*\bbike\b',
     r'selling.*\bcar\b', r'selling.*\bhouse\b',
     r'wts.*\bmonitor\b', r'wts.*\blaptop\b', r'wts.*\bphone\b',
     r'for sale.*\bmonitor\b', r'for sale.*\blaptop\b',
     r'used.*\bmonitor\b', r'used.*\blaptop\b', r'\b4k monitor\b',
-    # General discussion
     r'what do you think', r'your thoughts', r'opinion on', r'is it worth',
     r'has anyone been', r'anyone attended', r'review of', r'experience with',
     r'how was the', r'did you go', r'who is going', r"who's going",
     r'any updates on', r'any news about', r'when is the',
-    # Poetry/creative
     r'\bpoem\b', r'\bpoetry\b', r'\bstory\b', r'\bfiction\b',
     r'creative writing', r'original work',
-    # Questions about tickets (not buying/selling)
     r'how to get tickets', r'where to buy tickets', r'ticket price',
     r'cost of tickets', r'is it sold out', r'booking open',
     r'when will tickets release',
 ]
 
-# Pre-compile for speed
 _SKIP_RE = [re.compile(p, re.IGNORECASE) for p in SKIP_PATTERNS]
 _TICKET_WORDS = {'ticket', 'tickets', 'pass', 'passes', 'entry', 'fanpit', 'pit'}
 
 
 def is_available() -> bool:
-    return bool(GEMINI_API_KEY)
+    return bool(GROQ_API_KEY)
 
 
 def classify_batch(posts: list, event_keywords: list) -> dict:
     """
     Classify posts as 'buy', 'sell', or 'skip'.
-    Batches 20 posts per Gemini call with 4s delay to stay under 15 req/min.
+    Uses Groq llama-3.1-8b-instant, batch size 10, 2s sleep between batches.
     Falls back to keyword classification on failure.
     Returns {post_id: label}
     """
     if not is_available() or not posts:
-        logger.warning('Gemini unavailable — using keyword fallback')
+        logger.warning('Groq unavailable — using keyword fallback')
         return {p['id']: _keyword_filter(p) for p in posts}
 
     results = {}
-    batch_size = 20
+    batch_size = 10
     events_hint = ', '.join(event_keywords[:15]) if event_keywords else 'any concert/event tickets'
 
     for i in range(0, len(posts), batch_size):
         batch = posts[i:i + batch_size]
-        results.update(_call_gemini(batch, events_hint))
+        results.update(_call_groq(batch, events_hint))
         if i + batch_size < len(posts):
-            time.sleep(4)  # stay under 15 req/min free tier
+            time.sleep(2)  # 2s between batches → ~30 req/min max, well under Groq's 30 RPM limit
 
     return results
 
 
-def _call_gemini(batch: list, events_hint: str) -> dict:
+def _call_groq(batch: list, events_hint: str) -> dict:
     prompt = (
         f'You are filtering Reddit posts for a concert ticket resale marketplace in India.\n'
         f'Current events we care about: {events_hint}\n\n'
@@ -107,33 +104,42 @@ def _call_gemini(batch: list, events_hint: str) -> dict:
         f'"Have 3 Calvin Harris tickets, selling below MRP" = sell\n'
         f'"4K Monitor for sale" = skip\n'
         f'"Planning an event, suggestions for a budget venue?" = skip\n'
-        f'"Poem by me: Scores to Settle" = skip\n'
         f'"How was the Diljit concert?" = skip\n\n'
         f'Posts:\n' +
         json.dumps([{'id': p['id'], 'text': (p['title'] + ' ' + p.get('body', ''))[:300]}
                     for p in batch]) +
-        f'\n\nReply ONLY with valid JSON: {{"id1": "buy", "id2": "skip", ...}}'
+        f'\n\nReply ONLY with a valid JSON object, no explanation, no markdown: {{"id1": "buy", "id2": "skip", ...}}'
     )
 
     for attempt in range(3):
         try:
             res = requests.post(
-                f'{GEMINI_URL}?key={GEMINI_API_KEY}',
-                json={'contents': [{'parts': [{'text': prompt}]}],
-                      'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 1024}},
-                timeout=30
+                GROQ_URL,
+                headers={
+                    'Authorization': f'Bearer {GROQ_API_KEY}',
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'model': GROQ_MODEL,
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.1,
+                    'max_tokens': 512,  # 10 posts × ~20 chars = ~150 tokens max, 512 is plenty
+                },
+                timeout=30,
             )
+
             if res.status_code == 429:
                 wait = 15 * (attempt + 1)
-                logger.warning(f'Gemini 429 — waiting {wait}s (attempt {attempt+1}/3)')
+                logger.warning(f'Groq 429 — waiting {wait}s (attempt {attempt+1}/3)')
                 time.sleep(wait)
                 continue
+
             if res.status_code != 200:
-                logger.warning(f'Gemini error {res.status_code}: {res.text[:300]}')
+                logger.warning(f'Groq error {res.status_code}: {res.text[:300]}')
                 break
 
-            text = res.json()['candidates'][0]['content']['parts'][0]['text']
-            # Strip markdown fences if present
+            text = res.json()['choices'][0]['message']['content'].strip()
+            # Strip markdown fences if model adds them despite instructions
             text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
 
             valid = {'buy', 'sell', 'skip'}
@@ -150,45 +156,39 @@ def _call_gemini(batch: list, events_hint: str) -> dict:
                 except json.JSONDecodeError:
                     pass
 
-            # Try 2: salvage truncated JSON — extract complete "id": "label" pairs
+            # Try 2: salvage any complete "id": "label" pairs from truncated response
             salvaged = {}
             for m in re.finditer(r'"([a-z0-9]+)"\s*:\s*"(buy|sell|skip)"', text):
                 if m.group(1) in ids:
                     salvaged[m.group(1)] = m.group(2)
             if salvaged:
-                logger.info(f'Gemini partial JSON salvaged: {len(salvaged)}/{len(batch)} posts')
+                logger.info(f'Groq partial JSON salvaged: {len(salvaged)}/{len(batch)} posts')
                 return salvaged
 
-            logger.warning(f'Gemini returned no JSON: {text[:200]}')
+            logger.warning(f'Groq returned no JSON: {text[:200]}')
             break
 
         except json.JSONDecodeError as e:
-            logger.warning(f'Gemini JSON parse error: {e}')
+            logger.warning(f'Groq JSON parse error: {e}')
             break
         except Exception as e:
-            logger.warning(f'Gemini call failed: {e}')
+            logger.warning(f'Groq call failed: {e}')
             break
 
     return {p['id']: _keyword_filter(p) for p in batch}
 
 
 def _keyword_filter(post: dict) -> str:
-    """
-    Keyword-based classification. Used as fallback when Gemini is unavailable.
-    """
     text = (post.get('title', '') + ' ' + post.get('body', '')).lower()
 
-    # Check skip patterns first (these are real regex)
     for pat in _SKIP_RE:
         if pat.search(text):
-            # Override skip only if post has strong ticket + buy/sell signals
             has_ticket = any(w in text for w in _TICKET_WORDS)
             has_transaction = any(k in text for k in ['wts', 'wtb', 'selling ticket', 'buying ticket'])
             if not (has_ticket and has_transaction):
                 return 'skip'
 
     has_ticket_word = any(w in text for w in _TICKET_WORDS)
-
     is_buy = any(kw in text for kw in BUY_KEYWORDS)
     is_sell = any(kw in text for kw in SELL_KEYWORDS)
 
@@ -200,7 +200,6 @@ def _keyword_filter(post: dict) -> str:
     if is_sell and not is_buy:
         return 'sell'
     if is_buy and is_sell:
-        # FIX: was `sell_count > sell_count` (always False) — now correct
         buy_count = sum(1 for kw in BUY_KEYWORDS if kw in text)
         sell_count = sum(1 for kw in SELL_KEYWORDS if kw in text)
         if buy_count > sell_count:
@@ -212,5 +211,4 @@ def _keyword_filter(post: dict) -> str:
     return 'unclear'
 
 
-# Alias for any callers using old name
 _keyword_fallback = _keyword_filter
