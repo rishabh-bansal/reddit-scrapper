@@ -561,10 +561,25 @@ let knownIds = new Set(JSON.parse(localStorage.getItem('rt_known_ids') || '[]'))
 let globalSubCounts = {};
 let lastStatusData = {};
 
+// ── FETCH WITH TIMEOUT ──
 async function apiFetch(path, opts = {}) {
-  const res = await fetch(API + path, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers||{}) } });
-  if (!res.ok) throw new Error(res.status);
-  return res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  
+  try {
+    const res = await fetch(API + path, {
+      ...opts,
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) }
+    });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  } catch (e) {
+    clearTimeout(timeout);
+    console.error(`API fetch failed for ${path}:`, e);
+    throw e;
+  }
 }
 
 // ── STATUS ──
@@ -592,30 +607,39 @@ function applyStatus(s) {
 }
 
 async function checkStatus() {
-  try { applyStatus(await apiFetch('/api/status')); }
-  catch(e) {
-    ['statusReddit','statusTelegram','statusClaude','statusDB'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.className = 'status-pill err';
-    });
+  try { 
+    const data = await apiFetch('/api/status');
+    applyStatus(data);
+    return data;
+  } catch(e) {
+    console.warn('Status check failed:', e);
+    throw e;
   }
 }
 
 // ── LOAD POSTS ──
 async function loadPosts() {
-  setLoading(true);
-  try {
-    const posts = await apiFetch(`/api/posts?type=${activeFilter}&hide_contacted=${hideContacted}&limit=300`);
-    const prevCount = allPosts.length;
-    allPosts = posts;
-    const newPosts = posts.filter(p => !knownIds.has(p.id));
-    if (newPosts.length > 0 && prevCount > 0) { showBanner(newPosts.length); playPing(); }
-    newPosts.forEach(p => knownIds.add(p.id));
-    localStorage.setItem('rt_known_ids', JSON.stringify([...knownIds].slice(-2000)));
-    renderPosts();
-    document.getElementById('lastRefreshTime').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  } catch(e) { console.error('Load posts failed:', e); }
-  setLoading(false);
+  console.log('📡 Fetching posts...');
+  const url = `/api/posts?type=${activeFilter}&hide_contacted=${hideContacted}&limit=300`;
+  console.log('GET', url);
+  
+  const posts = await apiFetch(url);
+  console.log(`📦 Received ${posts.length} posts`);
+  
+  const prevCount = allPosts.length;
+  allPosts = posts;
+  
+  const newPosts = posts.filter(p => !knownIds.has(p.id));
+  if (newPosts.length > 0 && prevCount > 0) { 
+    showBanner(newPosts.length); 
+    playPing(); 
+  }
+  
+  newPosts.forEach(p => knownIds.add(p.id));
+  localStorage.setItem('rt_known_ids', JSON.stringify([...knownIds].slice(-2000)));
+  
+  renderPosts();
+  document.getElementById('lastRefreshTime').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 
 // ── LOAD STATS ──
@@ -657,16 +681,21 @@ async function loadStats() {
       </div>`).join('') || '<div style="font-family:JetBrains Mono,monospace;font-size:0.62rem;color:var(--muted)">No activity yet</div>';
 
     renderSubList();
-  } catch(e) { console.error('Stats failed:', e); }
+  } catch(e) { 
+    console.warn('Stats failed:', e); 
+  }
 }
 
 // ── SUBREDDITS ──
-// currentSubs: array of {name, priority}
 let currentSubs = [];
 
 async function loadSubreddits() {
-  try { currentSubs = await apiFetch('/api/subreddits'); renderSubList(); }
-  catch(e) {}
+  try { 
+    currentSubs = await apiFetch('/api/subreddits'); 
+    renderSubList(); 
+  } catch(e) {
+    console.warn('Failed to load subreddits:', e);
+  }
 }
 
 function renderSubList() {
@@ -693,7 +722,7 @@ function renderSubList() {
     list.ondrop = e => { e.preventDefault(); list.classList.remove('drag-over-list'); dropOnList(e, priority); };
   });
 
-  // ── Mobile drawer — tier-grouped with touch drag ──
+  // ── Mobile drawer ──
   tiers.forEach(priority => {
     const mList = document.getElementById('mSubList' + CAP(priority));
     if (!mList) return;
@@ -708,9 +737,6 @@ function renderSubList() {
         <span class="mobile-sub-del" onclick="removeSub(${idx})">✕</span>
       </div>`;
     }).join('') || `<div style="font-family:'JetBrains Mono',monospace;font-size:0.6rem;color:var(--muted);padding:8px 0">None — drag here to add</div>`;
-
-    // Touch drop zone on the tier list container itself
-    mList.ontouchend = null; // handled by global touchDragEnd
   });
 }
 
@@ -745,7 +771,7 @@ async function removeSub(idx) {
   renderSubList();
 }
 
-// ── DRAG & DROP (Desktop — HTML5 drag API) ──
+// ── DRAG & DROP (Desktop) ──
 let draggedName = null;
 
 function dragStart(e) {
@@ -793,7 +819,6 @@ let touchOffsetX = 0;
 let touchOffsetY = 0;
 
 function touchDragStart(e, el) {
-  // Don't start drag if tapping the delete button
   if (e.target.classList.contains('mobile-sub-del')) return;
   touchDragEl = el;
   touchDragName = el.dataset.name;
@@ -804,7 +829,6 @@ function touchDragStart(e, el) {
   touchOffsetX = touch.clientX - rect.left;
   touchOffsetY = touch.clientY - rect.top;
 
-  // Create floating clone
   touchClone = el.cloneNode(true);
   touchClone.style.cssText = `
     position: fixed; z-index: 9999; pointer-events: none; opacity: 0.85;
@@ -825,7 +849,6 @@ function touchDragMove(e) {
   touchClone.style.left = (touch.clientX - touchOffsetX) + 'px';
   touchClone.style.top = (touch.clientY - touchOffsetY) + 'px';
 
-  // Highlight drop zone
   document.querySelectorAll('.mobile-sub-tier-list').forEach(z => z.classList.remove('touch-drag-over'));
   const el = document.elementFromPoint(touch.clientX, touch.clientY);
   const zone = el?.closest('.mobile-sub-tier-list');
@@ -836,12 +859,10 @@ function touchDragEnd(e) {
   if (!touchClone) return;
   const touch = e.changedTouches[0];
 
-  // Clean up visual
   touchClone.remove(); touchClone = null;
   document.querySelectorAll('.touch-dragging').forEach(el => el.classList.remove('touch-dragging'));
   document.querySelectorAll('.touch-drag-over').forEach(el => el.classList.remove('touch-drag-over'));
 
-  // Find drop target
   const el = document.elementFromPoint(touch.clientX, touch.clientY);
   const zone = el?.closest('.mobile-sub-tier-list');
   const targetItem = el?.closest('.mobile-sub-item');
@@ -851,7 +872,6 @@ function touchDragEnd(e) {
   if (!sub) return;
 
   if (targetItem && targetItem.dataset.name !== touchDragName) {
-    // Drop on another item — reorder + change priority
     const newPriority = targetItem.dataset.priority;
     const fromIdx = currentSubs.findIndex(s => s.name === touchDragName);
     const toIdx = currentSubs.findIndex(s => s.name === targetItem.dataset.name);
@@ -864,7 +884,6 @@ function touchDragEnd(e) {
       renderSubList();
     }
   } else if (zone && zone.dataset.priority && zone.dataset.priority !== sub.priority) {
-    // Drop on empty tier zone — just change priority
     sub.priority = zone.dataset.priority;
     saveSubreddits(currentSubs);
     renderSubList();
@@ -881,7 +900,13 @@ function renderPosts() {
   const list = document.getElementById('postsList');
   const empty = document.getElementById('emptyWrap');
   document.getElementById('visibleCount').textContent = allPosts.length;
-  if (!allPosts.length) { list.innerHTML = ''; empty.style.display = 'block'; return; }
+  
+  if (!allPosts.length) { 
+    list.innerHTML = ''; 
+    empty.style.display = 'block'; 
+    return; 
+  }
+  
   empty.style.display = 'none';
   list.innerHTML = allPosts.map((p, i) => {
     const view = `https://reddit.com${p.permalink}`;
@@ -951,7 +976,9 @@ async function triggerScrape() {
     await apiFetch('/api/scrape', { method: 'POST' });
     await new Promise(r => setTimeout(r, 3000));
     await loadPosts(); await loadStats();
-  } catch(e) {}
+  } catch(e) {
+    console.warn('Scrape trigger failed:', e);
+  }
   document.getElementById('refreshDot').classList.remove('loading');
   document.getElementById('refreshLabel').textContent = 'Live';
 }
@@ -997,7 +1024,9 @@ async function loadEventsList() {
     document.getElementById('eventList').innerHTML = events.length
       ? events.map(e => `<div class="event-item"><span>${esc(e.name)}</span><span class="event-del" onclick="deleteEvent(${e.id})">✕</span></div>`).join('')
       : '<div style="font-family:JetBrains Mono,monospace;font-size:0.63rem;color:var(--muted);padding:8px 0">No events yet</div>';
-  } catch(e) {}
+  } catch(e) {
+    console.warn('Failed to load events:', e);
+  }
 }
 
 async function bulkAddEvents() {
@@ -1038,7 +1067,9 @@ function playPing() {
   } catch(e) {}
 }
 
-function setLoading(show) { document.getElementById('loadingWrap').style.display = show ? 'block' : 'none'; }
+function setLoading(show) { 
+  document.getElementById('loadingWrap').style.display = show ? 'block' : 'none'; 
+}
 
 // ── DM PRE-FILL ──
 function buildDmUrl(post) {
@@ -1055,7 +1086,6 @@ function buildDmMessage(post) {
   const type = post.post_type;
 
   if (type === 'sell') {
-    // They're selling — pitch them reticket as a safe platform
     return `Yo! Saw your post — if you're looking for a legit buyer, drop your listing on app.reticket.in 🎟️
 
 We're basically India's answer to Viagogo but actually built for Indian users (so we get the scam problem lol). Here's the deal:
@@ -1067,8 +1097,6 @@ We're basically India's answer to Viagogo but actually built for Indian users (s
 Would love to have you on there. Happy to answer any Qs!`;
   }
 
-  // They're buying — figure out what they want and pitch our inventory
-  // Extract hints from their post
   const zones = [];
   if (text.includes('pit') || text.includes('fan pit') || text.includes('fanpit')) zones.push('Pit/Fan Pit');
   if (text.includes('silver')) zones.push('Silver');
@@ -1080,13 +1108,11 @@ Would love to have you on there. Happy to answer any Qs!`;
   const quantities = text.match(/([1-9])\s*ticket/);
   const qty = quantities ? quantities[1] : null;
 
-  // Build a casual, helpful opener
   let opener = `Yo! Saw you're looking for tickets`;
   if (qty) opener += ` (${qty} ticket${parseInt(qty) > 1 ? 's' : ''})`;
   if (zones.length) opener += ` — ${zones.join('/')} zone`;
   opener += '. We might have what you need! 🎟️';
 
-  // Build the missing info ask — only ask for what's not already in their post
   const missing = [];
   if (!zones.length) missing.push('zone/category (Pit, Silver, Gold etc.)');
   if (!qty) missing.push('how many tickets');
@@ -1094,17 +1120,11 @@ Would love to have you on there. Happy to answer any Qs!`;
     missing.push('which city');
   }
 
-  let msg = opener + '
-
-';
-  msg += `We sell below BookMyShow/District prices — legit tickets, no scams.
-
-`;
+  let msg = opener + '\n\n';
+  msg += `We sell below BookMyShow/District prices — legit tickets, no scams.\n\n`;
 
   if (missing.length) {
-    msg += `Quick Q before we confirm: what's your preferred ${missing.join(' and ')}?
-
-`;
+    msg += `Quick Q before we confirm: what's your preferred ${missing.join(' and ')}?\n\n`;
   }
 
   msg += `Let me know and I'll check what we've got!`;
@@ -1128,16 +1148,67 @@ function formatDuration(s) {
 }
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-// ── INIT ──
+// ── INIT WITH PROPER ERROR HANDLING ──
 async function init() {
-  checkStatus();
-  await loadSubreddits();
-  await loadPosts();
-  await loadStats();
-  setInterval(checkStatus, 5*60*1000);
-  setInterval(async () => { await loadPosts(); await loadStats(); }, 61000);
+  console.log('🚀 Reticket dashboard initializing...');
+  setLoading(true);
+  
+  // Try status, but don't block
+  try {
+    await checkStatus();
+    console.log('✓ Status OK');
+  } catch (e) {
+    console.warn('⚠️ Status check failed:', e);
+  }
+  
+  // Load subreddits
+  try {
+    await loadSubreddits();
+    console.log('✓ Subreddits loaded');
+  } catch (e) {
+    console.warn('⚠️ Subreddits failed:', e);
+  }
+  
+  // LOAD POSTS - this is the critical one
+  try {
+    await loadPosts();
+    console.log('✓ Posts loaded successfully');
+  } catch (e) {
+    console.error('❌ Failed to load posts:', e);
+    document.getElementById('loadingWrap').style.display = 'none';
+    document.getElementById('emptyWrap').innerHTML = `
+      <div class="e-icon">⚠️</div>
+      <div class="e-title">Failed to Load Posts</div>
+      <div class="e-sub">${e.message || 'Unknown error'}</div>
+      <button onclick="init()" style="margin-top:16px;padding:8px 16px;background:var(--accent);color:white;border:none;border-radius:4px;font-family:JetBrains Mono,monospace;cursor:pointer;">↻ Retry</button>
+    `;
+    document.getElementById('emptyWrap').style.display = 'block';
+    return; // Stop here if posts fail
+  }
+  
+  // Load stats (optional)
+  try {
+    await loadStats();
+    console.log('✓ Stats loaded');
+  } catch (e) {
+    console.warn('⚠️ Stats failed:', e);
+  }
+  
+  setLoading(false);
 }
+
+// Start everything
 init();
+
+// Set up periodic refresh
+setInterval(async () => { 
+  try {
+    await loadPosts(); 
+    await loadStats(); 
+  } catch (e) {
+    console.warn('Periodic refresh failed:', e);
+  }
+}, 61000);
 </script>
 </body>
 </html>
