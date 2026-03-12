@@ -93,16 +93,16 @@ def delete_event(kid):
 def status():
     results = {}
 
-    # Reddit check — single lightweight request
-    try:
-        r = req.get(
-            'https://www.reddit.com/r/ConcertTicketsIndia/new.json?limit=1',
-            headers={'User-Agent': 'Mozilla/5.0 (compatible; reticket/1.0)'},
-            timeout=8
-        )
-        results['reddit'] = {'ok': r.status_code == 200, 'status': r.status_code}
-    except Exception as e:
-        results['reddit'] = {'ok': False, 'error': str(e)}
+    # Reddit status — use last scrape result, never hit Reddit just for a status check
+    last_sub = scraper_state.get('last_scraped_sub')
+    last_at = scraper_state.get('last_scraped_at')
+    last_ok = scraper_state.get('last_scrape_ok', None)
+    results['reddit'] = {
+        'ok': last_ok if last_ok is not None else True,  # assume ok until proven otherwise
+        'last_sub': last_sub,
+        'last_scraped_at': last_at,
+        'note': 'status from last scrape cycle, not a live check'
+    }
 
     # Telegram check
     telegram_token = os.environ.get('TELEGRAM_TOKEN', '')
@@ -169,6 +169,8 @@ scraper_state = {
     'current_index': 0,
     'last_scraped_sub': None,
     'last_scraped_at': None,
+    'last_scrape_ok': None,   # None = not run yet, True/False after first scrape
+    'consecutive_failures': 0,
 }
 
 def scrape_next_sub():
@@ -200,10 +202,15 @@ def scrape_next_sub():
         scraper_state['current_index'] = (idx + 1) % len(subs)
         scraper_state['last_scraped_sub'] = sub
         scraper_state['last_scraped_at'] = datetime.utcnow().isoformat()
+        scraper_state['last_scrape_ok'] = True
+        scraper_state['consecutive_failures'] = 0
 
-        logger.info(f'r/{sub}: {new_count} ticket posts stored. Next: r/{subs[(idx+1) % len(subs)]} in {INTER_SUB_DELAY//60}m')
+        next_sub = subs[(idx + 1) % len(subs)]
+        logger.info(f'r/{sub}: {new_count} ticket posts stored. Next: r/{next_sub} in {INTER_SUB_DELAY//60}m')
 
     except Exception as e:
+        scraper_state['last_scrape_ok'] = False
+        scraper_state['consecutive_failures'] = scraper_state.get('consecutive_failures', 0) + 1
         logger.error(f'scrape_next_sub error: {e}')
 
 
