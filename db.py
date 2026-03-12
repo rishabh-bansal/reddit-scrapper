@@ -175,19 +175,42 @@ def set_setting(key, value):
     conn.commit()
     conn.close()
 
+DEFAULT_SUBS = [
+    {'name': 'ConcertTicketsIndia',   'priority': 'high'},
+    {'name': 'ticketresellingindia',  'priority': 'high'},
+    {'name': 'TicketResale',          'priority': 'high'},
+    {'name': 'ConcertResale',         'priority': 'high'},
+    {'name': 'concerts_india',        'priority': 'medium'},
+    {'name': 'ConcertsIndia_',        'priority': 'medium'},
+    {'name': 'IndianHipHopHeads',     'priority': 'medium'},
+    {'name': 'Concerts',              'priority': 'medium'},
+    {'name': 'delhi',                 'priority': 'low'},
+    {'name': 'delhi_marketplace',     'priority': 'low'},
+    {'name': 'chandigarhmarketplace', 'priority': 'low'},
+    {'name': 'Tickets',               'priority': 'low'},
+]
+
 def get_subreddits():
-    val = get_setting('subreddits')
+    """Returns list of {name, priority} dicts."""
+    val = get_setting('subreddits_v2')
     if val:
         return json.loads(val)
-    return [
-        'chandigarhmarketplace','ConcertResale','Concerts','concerts_india',
-        'ConcertsIndia_','ConcertTicketsIndia','CreditCardsIndia','delhi',
-        'delhi_marketplace','IndianHipHopHeads','TicketResale',
-        'ticketresellingindia','Tickets'
-    ]
+    # Migrate old plain list if it exists
+    old_val = get_setting('subreddits')
+    if old_val:
+        old_list = json.loads(old_val)
+        migrated = [{'name': s, 'priority': 'medium'} for s in old_list]
+        save_subreddits(migrated)
+        return migrated
+    return DEFAULT_SUBS
 
 def save_subreddits(subs: list):
-    set_setting('subreddits', json.dumps(subs))
+    """subs: list of {name, priority} dicts."""
+    set_setting('subreddits_v2', json.dumps(subs))
+
+def get_subreddit_names():
+    """Flat list of names only, for scraper."""
+    return [s['name'] for s in get_subreddits()]
 
 def get_event_keywords():
     conn = get_conn()

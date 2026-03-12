@@ -99,7 +99,7 @@ def send_weekly_stats(stats: dict):
 def send_startup_message(dashboard_url: str):
     msg = (
         f"🚀 <b>Reticket is live!</b>\n\n"
-        f"Scraping Reddit every 61 seconds for concert ticket leads.\n\n"
+        f"Scraping Reddit with priority tiers: High every 5min, Medium every 15min, Low every 45min.\n\n"
         f"🌐 Dashboard: {dashboard_url}\n\n"
         f"You'll get instant alerts for new WTB/WTS posts here."
     )

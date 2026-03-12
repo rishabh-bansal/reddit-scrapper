@@ -3,7 +3,7 @@ import os
 import time
 import random
 import logging
-from db import upsert_post, get_subreddits, get_all_extra_keywords
+from db import upsert_post, get_subreddits, get_subreddit_names, get_all_extra_keywords
 
 # Re-export so app.py can import it from here
 __all__ = ['fetch_subreddit', 'scrape_all', 'upsert_post']
@@ -154,8 +154,8 @@ def classify_with_ai(posts: list) -> dict:
 
 def fetch_subreddit(subreddit: str, extra_keywords: list) -> list:
     url = f'https://www.reddit.com/r/{subreddit}/new.json?limit=100'
-    # Random jitter so requests never look like a robot clock
-    time.sleep(random.uniform(2, 5))
+    # Small jitter so requests don't look like a robot clock
+    time.sleep(random.uniform(0.5, 1.5))
     try:
         res = requests.get(url, headers=get_headers(), timeout=15)
         if res.status_code == 404:
@@ -218,7 +218,7 @@ def fetch_subreddit(subreddit: str, extra_keywords: list) -> list:
 
 
 def scrape_all() -> list:
-    subreddits = get_subreddits()
+    subreddits = get_subreddit_names()
     extra_keywords = get_all_extra_keywords()
     new_posts = []
 

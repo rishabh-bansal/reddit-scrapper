@@ -63,9 +63,10 @@ def unmark_contacted(post_id):
 
 @app.route('/api/scrape', methods=['POST'])
 def manual_scrape():
-    """Trigger a manual scrape of ONE subreddit (next in rotation)"""
-    threading.Thread(target=scrape_next_sub, daemon=True).start()
-    return jsonify({'ok': True, 'message': 'Scrape triggered for next subreddit in rotation'})
+    """Force all due subs to be scraped now by resetting their next_scrape_times."""
+    scraper_state['next_scrape_times'] = {}  # reset all — everything becomes due
+    threading.Thread(target=scrape_due_subs, daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Forced scrape of all subreddits triggered'})
 
 # ── Event Keywords ──
 
@@ -134,10 +135,10 @@ def status():
 
     # Scraper status
     results['scraper'] = {
-        'current_index': scraper_state['current_index'],
         'last_scraped_sub': scraper_state['last_scraped_sub'],
         'last_scraped_at': scraper_state['last_scraped_at'],
-        'interval_seconds': INTER_SUB_DELAY,
+        'next_scrape_times': {k: round(v - time.time()) for k, v in scraper_state['next_scrape_times'].items()},
+        'intervals': PRIORITY_INTERVALS,
         'subs_total': len(db.get_subreddits())
     }
 
@@ -161,68 +162,90 @@ def debug_scrape():
 
 # ── Scraper State ──
 
-# ONE subreddit every 3 minutes = safe and sustainable
-# 13 subs × 3 min = full cycle every ~39 minutes
-INTER_SUB_DELAY = 3 * 60  # seconds between each subreddit fetch
+# Priority-based intervals (safe for Reddit rate limits):
+#   High   → every 5 min  (ticket-focused subs, most valuable)
+#   Medium → every 15 min (concert community subs)
+#   Low    → every 45 min (general city/marketplace subs)
+#
+# Total max requests per hour across all subs ≈ 20 → well within Reddit limits
 
-scraper_state = {
-    'current_index': 0,
-    'last_scraped_sub': None,
-    'last_scraped_at': None,
-    'last_scrape_ok': None,   # None = not run yet, True/False after first scrape
-    'consecutive_failures': 0,
+PRIORITY_INTERVALS = {
+    'high':   5 * 60,   # 300s
+    'medium': 15 * 60,  # 900s
+    'low':    45 * 60,  # 2700s
 }
 
-def scrape_next_sub():
-    """Fetch exactly ONE subreddit, advance the rotation index."""
+scraper_state = {
+    'last_scraped_sub': None,
+    'last_scraped_at': None,
+    'last_scrape_ok': None,
+    'consecutive_failures': 0,
+    'next_scrape_times': {},  # sub_name -> next scrape unix timestamp
+}
+
+def scrape_due_subs():
+    """Scrape all subreddits that are due based on their priority interval."""
     try:
-        subs = db.get_subreddits()
+        subs = db.get_subreddits()  # list of {name, priority}
         if not subs:
             return
 
-        idx = scraper_state['current_index'] % len(subs)
-        sub = subs[idx]
-
-        logger.info(f'Scraping [{idx+1}/{len(subs)}] r/{sub}')
+        now = time.time()
         extra_keywords = db.get_all_extra_keywords()
-        posts = scraper.fetch_subreddit(sub, extra_keywords)
+        next_times = scraper_state['next_scrape_times']
 
-        new_count = 0
-        for post in posts:
-            scraper.upsert_post(post)
-            new_count += 1
+        for sub_obj in subs:
+            name = sub_obj['name']
+            priority = sub_obj.get('priority', 'medium')
+            interval = PRIORITY_INTERVALS.get(priority, PRIORITY_INTERVALS['medium'])
 
-        # Notify new unread posts
-        unnotified = db.get_unnotified_posts()
-        for post in unnotified:
-            bot.send_post_alert(post)
-            db.mark_notified(post['id'])
-            time.sleep(0.3)
+            # Due if never scraped or past its interval
+            if now >= next_times.get(name, 0):
+                logger.info(f'Scraping r/{name} [{priority}]')
+                try:
+                    posts = scraper.fetch_subreddit(name, extra_keywords)
+                    for post in posts:
+                        db.upsert_post(post)
 
-        scraper_state['current_index'] = (idx + 1) % len(subs)
-        scraper_state['last_scraped_sub'] = sub
-        scraper_state['last_scraped_at'] = datetime.utcnow().isoformat()
-        scraper_state['last_scrape_ok'] = True
-        scraper_state['consecutive_failures'] = 0
+                    # Notify new posts
+                    unnotified = db.get_unnotified_posts()
+                    for post in unnotified:
+                        bot.send_post_alert(post)
+                        db.mark_notified(post['id'])
+                        time.sleep(0.3)
 
-        next_sub = subs[(idx + 1) % len(subs)]
-        logger.info(f'r/{sub}: {new_count} ticket posts stored. Next: r/{next_sub} in {INTER_SUB_DELAY//60}m')
+                    next_times[name] = now + interval
+                    scraper_state['last_scraped_sub'] = name
+                    scraper_state['last_scraped_at'] = datetime.utcnow().isoformat()
+                    scraper_state['last_scrape_ok'] = True
+                    scraper_state['consecutive_failures'] = 0
+                    logger.info(f'r/{name}: {len(posts)} posts. Next in {interval//60}m')
+
+                except Exception as e:
+                    scraper_state['last_scrape_ok'] = False
+                    scraper_state['consecutive_failures'] += 1
+                    logger.error(f'Error scraping r/{name}: {e}')
+                    next_times[name] = now + 60  # retry in 1 min on error
+
+                # Small gap between each sub to avoid burst
+                time.sleep(1)
 
     except Exception as e:
-        scraper_state['last_scrape_ok'] = False
-        scraper_state['consecutive_failures'] = scraper_state.get('consecutive_failures', 0) + 1
-        logger.error(f'scrape_next_sub error: {e}')
+        logger.error(f'scrape_due_subs error: {e}')
 
 
 def scrape_loop():
     """
-    Trickle scraper — one subreddit every 3 minutes.
-    Never hammers Reddit. Full cycle = ~39 min for 13 subs.
+    Checks every 30 seconds which subs are due.
+    Runs each due sub sequentially with small gaps — never blocks the check timer.
     """
     time.sleep(10)  # let app fully boot first
     while True:
-        scrape_next_sub()
-        time.sleep(INTER_SUB_DELAY)
+        try:
+            scrape_due_subs()
+        except Exception as e:
+            logger.error(f'scrape_loop error: {e}')
+        time.sleep(30)  # check every 30s, only fires what's actually due
 
 
 def self_ping_loop():
@@ -262,7 +285,7 @@ def start_background_threads():
     threading.Thread(target=scrape_loop, daemon=True).start()
     threading.Thread(target=self_ping_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    logger.info(f'Background threads started. Scraping 1 sub every {INTER_SUB_DELAY//60} minutes.')
+    logger.info('Background threads started. Priority scraping: high=5min, medium=15min, low=45min.')
 
 
 if __name__ == '__main__':
