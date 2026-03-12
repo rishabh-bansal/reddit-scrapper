@@ -331,6 +331,7 @@ header {
     </div>
     <button class="header-btn accent" onclick="openEventsModal()">🎫 Events<span id="eventsCountBadge" class="events-count-badge" style="display:none">0</span></button>
     <button class="header-btn" onclick="triggerScrape()">↻</button>
+    <button class="header-btn" onclick="triggerReclassify()" title="Re-run AI on unclear posts">✦ AI</button>
   </div>
 </header>
 
@@ -1052,6 +1053,16 @@ async function triggerScrape() {
   document.getElementById('refreshLabel').textContent = 'Live';
 }
 
+async function triggerReclassify() {
+  if (!confirm('This will re-run AI classification on all unclear posts in the DB. Continue?')) return;
+  try {
+    await apiFetch('/api/reclassify', { method: 'POST' });
+    alert('Reclassification started! Check back in ~2 minutes then refresh.');
+  } catch(e) {
+    alert('Failed: ' + e.message);
+  }
+}
+
 // ── MOBILE NAV ──
 function mobileNav(tab) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
@@ -1160,57 +1171,69 @@ function buildDmUrl(post) {
 }
 
 function buildDmMessage(post) {
-  const title = (post.title || '').toLowerCase();
-  const body = (post.body || '').toLowerCase();
-  const text = title + ' ' + body;
+  const title = (post.title || '');
+  const body = (post.body || '');
+  const text = (title + ' ' + body).toLowerCase();
   const type = post.post_type;
 
-  if (type === 'sell') {
-    return `Yo! Saw your post — if you're looking for a legit buyer, drop your listing on app.reticket.in 🎟️
+  // Extract quantity
+  const qtyMatch = text.match(/\b([1-9])\s*(ticket|pass|seat)/i) ||
+                   text.match(/\b(one|two|three|four|five)\s*(ticket|pass)/i);
+  const qtyMap = { one: '1', two: '2', three: '3', four: '4', five: '5' };
+  let qty = null;
+  if (qtyMatch) qty = qtyMap[qtyMatch[1].toLowerCase()] || qtyMatch[1];
 
-We're basically India's answer to Viagogo but actually built for Indian users (so we get the scam problem lol). Here's the deal:
-- 400+ community members actively looking for tickets
-- Free to list, no commission
-- We handle delivery + KYC so both sides are protected
-- Buyers on our platform are verified, no timewasters
+  // Extract city
+  const cities = ['delhi','mumbai','bangalore','bengaluru','pune','hyderabad','chennai','kolkata','chandigarh','gurgaon','noida'];
+  const city = cities.find(c => text.includes(c));
+  const cityDisplay = city ? (city === 'bengaluru' ? 'Bangalore' : city.charAt(0).toUpperCase() + city.slice(1)) : null;
 
-Would love to have you on there. Happy to answer any Qs!`;
-  }
-
+  // Extract zones
   const zones = [];
-  if (text.includes('pit') || text.includes('fan pit') || text.includes('fanpit')) zones.push('Pit/Fan Pit');
+  if (text.match(/\bpit\b|fan.?pit|fanpit/)) zones.push('Pit/Fan Pit');
   if (text.includes('silver')) zones.push('Silver');
   if (text.includes('gold')) zones.push('Gold');
   if (text.includes('platinum')) zones.push('Platinum');
   if (text.includes('vip')) zones.push('VIP');
   if (text.includes('bronze')) zones.push('Bronze');
 
-  const quantities = text.match(/\b([1-9])\s*ticket/);
-  const qty = quantities ? quantities[1] : null;
+  // Extract artist/event
+  const knownArtists = ['diljit dosanjh','diljit','coldplay','calvin harris','ap dhillon',
+    'arijit singh','arijit','badshah','divine','ar rahman','honey singh','nucleya',
+    'martin garrix','alan walker','marshmello','chainsmokers','karan aujla','kendrick',
+    'nh7','lollapalooza','sunburn','zedd','hardwell','afrojack','steve aoki','diplo','skrillex'];
+  const artist = knownArtists.find(a => text.includes(a));
+  const artistDisplay = artist ? artist.split(' ').map(w => w.charAt(0).toUpperCase()+w.slice(1)).join(' ') : null;
 
-  let opener = `Yo! Saw you're looking for tickets`;
-  if (qty) opener += ` (${qty} ticket${parseInt(qty) > 1 ? 's' : ''})`;
-  if (zones.length) opener += ` — ${zones.join('/')} zone`;
-  opener += '. We might have what you need! 🎟️';
+  if (type === 'sell') {
+    let line1 = 'Yo! Saw your post about';
+    if (artistDisplay) line1 += ' ' + artistDisplay;
+    line1 += ' tickets';
+    if (cityDisplay) line1 += ' in ' + cityDisplay;
+    line1 += " — if you're looking for a legit buyer, drop your listing on app.reticket.in 🎟️";
+    return line1 + "\n\nWe're basically India's answer to Viagogo but actually built for Indian users (so we get the scam problem lol). Here's the deal:\n- 400+ community members actively looking for tickets\n- Free to list, no commission\n- We handle delivery + KYC so both sides are protected\n- Buyers on our platform are verified, no timewasters\n\nWould love to have you on there. Happy to answer any Qs!";
+  }
+
+  // BUY DM
+  let opener = "Yo! Saw you're looking for";
+  if (qty) opener += ' ' + qty;
+  if (artistDisplay) opener += ' ' + artistDisplay;
+  opener += ' ticket' + (qty && qty !== '1' ? 's' : '');
+  if (zones.length) opener += ' (' + zones.join('/') + ' zone)';
+  if (cityDisplay) opener += ' in ' + cityDisplay;
+  opener += ' — we might have exactly what you need! 🎟️';
 
   const missing = [];
   if (!zones.length) missing.push('zone/category (Pit, Silver, Gold etc.)');
   if (!qty) missing.push('how many tickets');
-  if (!text.includes('delhi') && !text.includes('mumbai') && !text.includes('bangalore') && !text.includes('pune') && !text.includes('hyderabad')) {
-    missing.push('which city');
-  }
+  if (!cityDisplay) missing.push('which city');
 
   let msg = opener + '\n\n';
-  msg += `We sell below BookMyShow/District prices — legit tickets, no scams.\n\n`;
-
-  if (missing.length) {
-    msg += `Quick Q before we confirm: what's your preferred ${missing.join(' and ')}?\n\n`;
-  }
-
-  msg += `Let me know and I'll check what we've got!`;
+  msg += "We sell below BookMyShow/District prices — legit tickets, no scams.\n\n";
+  if (missing.length) msg += "Quick Q before we confirm: what's your preferred " + missing.join(' and ') + "?\n\n";
+  msg += "Let me know and I'll check what we've got!";
   return msg;
 }
-
 // ── HELPERS ──
 function timeAgo(utc) {
   const s = Math.floor(Date.now()/1000 - utc);
@@ -1232,15 +1255,14 @@ function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 async function init() {
   console.log('🚀 Reticket dashboard initializing...');
   
-  // Load posts FIRST (fast, uses cache)
-  await loadPosts();
+  // Load posts + stats in parallel (fastest perceived load)
+  await Promise.all([loadPosts(), loadStats()]);
   
-  // Load everything else in background
+  // Load secondary data in background
   setTimeout(async () => {
     try {
       await checkStatus();
       await loadSubreddits();
-      await loadStats();
     } catch (e) {
       console.warn('Background loading failed:', e);
     }
