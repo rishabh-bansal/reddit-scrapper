@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
+# Init DB immediately at startup — before any requests
+db.init_db()
+
 DASHBOARD_URL = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
 
 # ── API Routes ──
@@ -64,8 +67,28 @@ def manual_scrape():
     threading.Thread(target=run_scrape_cycle, daemon=True).start()
     return jsonify({'ok': True, 'message': 'Scrape triggered'})
 
-@app.route('/api/health')
-def health():
+@app.route('/api/debug')
+def debug():
+    """Test Reddit fetch for one subreddit and return raw result"""
+    import requests as req
+    sub = request.args.get('sub', 'ConcertTicketsIndia')
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+    }
+    try:
+        res = req.get(f'https://www.reddit.com/r/{sub}/new.json?limit=5', headers=headers, timeout=10)
+        return jsonify({
+            'status': res.status_code,
+            'sub': sub,
+            'post_count': len(res.json().get('data', {}).get('children', [])),
+            'first_title': res.json().get('data', {}).get('children', [{}])[0].get('data', {}).get('title', 'none') if res.json().get('data', {}).get('children') else 'empty',
+            'subreddits_in_db': db.get_subreddits()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'subreddits_in_db': db.get_subreddits()})
+
+
     return jsonify({'status': 'ok', 'time': datetime.utcnow().isoformat()})
 
 # Self-ping to prevent Render free tier sleeping
