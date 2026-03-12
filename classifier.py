@@ -1,17 +1,39 @@
 import json
 import re
 import time
+import threading
 import logging
 import requests
+from collections import deque
 from config import GROQ_API_KEY
 
 logger = logging.getLogger(__name__)
 
-# Groq free tier: llama-3.1-8b-instant
-# Limits: ~30 req/min, 500K tokens/day
-# We sleep 2s between batches → max 30 req/min, well within limits
 GROQ_MODEL = 'llama-3.1-8b-instant'
 GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
+
+# Sliding window rate limiter — tracks actual request timestamps across all threads
+# Groq free tier: 30 RPM. We cap at 25 to leave a safe buffer.
+class _RateLimiter:
+    def __init__(self, max_requests=25, window=60):
+        self.max_requests = max_requests
+        self.window = window
+        self.timestamps = deque()
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            while self.timestamps and self.timestamps[0] < now - self.window:
+                self.timestamps.popleft()
+            if len(self.timestamps) >= self.max_requests:
+                sleep_for = self.window - (now - self.timestamps[0]) + 0.5
+                if sleep_for > 0:
+                    logger.info(f'Groq rate limit: waiting {sleep_for:.1f}s')
+                    time.sleep(sleep_for)
+            self.timestamps.append(time.time())
+
+_rate_limiter = _RateLimiter()
 
 BUY_KEYWORDS = [
     'wtb', 'want to buy', 'looking to buy', 'looking for', 'need ticket', 'need tickets',
@@ -33,7 +55,6 @@ SELL_KEYWORDS = [
     'have 3 tickets', 'selling two', 'selling one', 'dm for price', 'price negotiable',
 ]
 
-# Real regex patterns — used with re.search()
 SKIP_PATTERNS = [
     r'planning an? event', r'organizing an? event', r'hosting an? event',
     r'looking for venue', r'suggestions for.*event', r'need recommendations for',
@@ -65,12 +86,6 @@ def is_available() -> bool:
 
 
 def classify_batch(posts: list, event_keywords: list) -> dict:
-    """
-    Classify posts as 'buy', 'sell', or 'skip'.
-    Uses Groq llama-3.1-8b-instant, batch size 10, 2s sleep between batches.
-    Falls back to keyword classification on failure.
-    Returns {post_id: label}
-    """
     if not is_available() or not posts:
         logger.warning('Groq unavailable — using keyword fallback')
         return {p['id']: _keyword_filter(p) for p in posts}
@@ -82,8 +97,6 @@ def classify_batch(posts: list, event_keywords: list) -> dict:
     for i in range(0, len(posts), batch_size):
         batch = posts[i:i + batch_size]
         results.update(_call_groq(batch, events_hint))
-        if i + batch_size < len(posts):
-            time.sleep(2)  # 2s between batches → ~30 req/min max, well under Groq's 30 RPM limit
 
     return results
 
@@ -111,6 +124,9 @@ def _call_groq(batch: list, events_hint: str) -> dict:
         f'\n\nReply ONLY with a valid JSON object, no explanation, no markdown: {{"id1": "buy", "id2": "skip", ...}}'
     )
 
+    # Apply rate limiting before every call
+    _rate_limiter.wait()
+
     for attempt in range(3):
         try:
             res = requests.post(
@@ -123,7 +139,7 @@ def _call_groq(batch: list, events_hint: str) -> dict:
                     'model': GROQ_MODEL,
                     'messages': [{'role': 'user', 'content': prompt}],
                     'temperature': 0.1,
-                    'max_tokens': 512,  # 10 posts × ~20 chars = ~150 tokens max, 512 is plenty
+                    'max_tokens': 512,
                 },
                 timeout=30,
             )
@@ -139,13 +155,12 @@ def _call_groq(batch: list, events_hint: str) -> dict:
                 break
 
             text = res.json()['choices'][0]['message']['content'].strip()
-            # Strip markdown fences if model adds them despite instructions
             text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
 
             valid = {'buy', 'sell', 'skip'}
             ids = {p['id'] for p in batch}
 
-            # Try 1: full valid JSON
+            # Try full JSON parse
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
                 try:
@@ -156,7 +171,7 @@ def _call_groq(batch: list, events_hint: str) -> dict:
                 except json.JSONDecodeError:
                     pass
 
-            # Try 2: salvage any complete "id": "label" pairs from truncated response
+            # Salvage partial/truncated response
             salvaged = {}
             for m in re.finditer(r'"([a-z0-9]+)"\s*:\s*"(buy|sell|skip)"', text):
                 if m.group(1) in ids:
@@ -194,7 +209,6 @@ def _keyword_filter(post: dict) -> str:
 
     if not has_ticket_word:
         return 'unclear'
-
     if is_buy and not is_sell:
         return 'buy'
     if is_sell and not is_buy:
