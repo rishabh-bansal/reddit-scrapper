@@ -3,23 +3,68 @@ import logging
 from datetime import datetime
 import psycopg2
 import psycopg2.extras
+from psycopg2 import pool
 from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-# ── Connection ──
+# ── Connection Pool ──
+db_pool = None
+
+def init_db_pool():
+    """Initialize the connection pool (call once at startup)"""
+    global db_pool
+    if not DATABASE_URL:
+        logger.error('DATABASE_URL is not set')
+        return False
+    
+    try:
+        db_pool = pool.SimpleConnectionPool(
+            1, 10,  # min 1, max 10 connections
+            DATABASE_URL,
+            connect_timeout=5,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5
+        )
+        logger.info('✓ Database connection pool created')
+        return True
+    except Exception as e:
+        logger.error(f'✗ Failed to create connection pool: {e}')
+        return False
 
 def get_conn():
+    """Get a connection from the pool"""
     if not DATABASE_URL:
         raise RuntimeError('DATABASE_URL is not set')
-    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    
+    if db_pool:
+        try:
+            return db_pool.getconn()
+        except Exception as e:
+            logger.error(f'Failed to get connection from pool: {e}')
+            # Fall back to direct connection
+            return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+    else:
+        return psycopg2.connect(DATABASE_URL, connect_timeout=10)
 
+def return_conn(conn):
+    """Return a connection to the pool"""
+    if db_pool and conn:
+        try:
+            db_pool.putconn(conn)
+        except Exception as e:
+            logger.error(f'Failed to return connection to pool: {e}')
+            conn.close()
+    elif conn:
+        conn.close()
 
 def init_db():
     """Verify DB connectivity on startup. Warns but does NOT crash the app."""
     try:
         conn = get_conn()
-        conn.close()
+        return_conn(conn)
         logger.info('✓ Supabase DB connected OK')
         return True
     except Exception as e:
@@ -27,7 +72,7 @@ def init_db():
         logger.error('  → Check DATABASE_URL env var')
         logger.error('  → Must use session pooler for Render (IPv4):')
         logger.error('  → postgresql://postgres.PROJECT_REF:PASSWORD@aws-0-REGION.pooler.supabase.com:5432/postgres')
-        return False  # Never raise — app still boots and serves dashboard
+        return False
 
 # ── Posts ──
 
@@ -54,7 +99,7 @@ def upsert_post(post: dict):
                     int(datetime.utcnow().timestamp())
                 ))
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def get_posts(limit=200, offset=0, post_type=None, hide_contacted=False):
@@ -73,18 +118,28 @@ def get_posts(limit=200, offset=0, post_type=None, hide_contacted=False):
             c.execute(query, params)
             return [dict(r) for r in c.fetchall()]
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def get_stats():
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
-            c.execute('SELECT COUNT(*) as cnt FROM posts'); total = c.fetchone()['cnt']
-            c.execute('SELECT COUNT(*) as cnt FROM posts WHERE contacted=1'); contacted = c.fetchone()['cnt']
-            c.execute("SELECT COUNT(*) as cnt FROM posts WHERE post_type='sell'"); sell = c.fetchone()['cnt']
-            c.execute("SELECT COUNT(*) as cnt FROM posts WHERE post_type='buy'"); buy = c.fetchone()['cnt']
-            c.execute("SELECT COUNT(*) as cnt FROM posts WHERE post_type='unclear'"); unclear = c.fetchone()['cnt']
+            # Use multiple queries but same connection
+            c.execute('SELECT COUNT(*) as cnt FROM posts')
+            total = c.fetchone()['cnt']
+            
+            c.execute('SELECT COUNT(*) as cnt FROM posts WHERE contacted=1')
+            contacted = c.fetchone()['cnt']
+            
+            c.execute("SELECT COUNT(*) as cnt FROM posts WHERE post_type='sell'")
+            sell = c.fetchone()['cnt']
+            
+            c.execute("SELECT COUNT(*) as cnt FROM posts WHERE post_type='buy'")
+            buy = c.fetchone()['cnt']
+            
+            c.execute("SELECT COUNT(*) as cnt FROM posts WHERE post_type='unclear'")
+            unclear = c.fetchone()['cnt']
 
             c.execute('SELECT AVG(contacted_at - created_utc) as avg FROM posts WHERE contacted=1 AND contacted_at IS NOT NULL')
             avg_row = c.fetchone()['avg']
@@ -115,7 +170,7 @@ def get_stats():
                 'sub_counts': sub_counts
             }
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def get_unnotified_posts():
@@ -125,7 +180,7 @@ def get_unnotified_posts():
             c.execute('SELECT * FROM posts WHERE notified=0 ORDER BY created_utc DESC')
             return [dict(r) for r in c.fetchall()]
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def mark_notified(post_id: str):
@@ -135,7 +190,7 @@ def mark_notified(post_id: str):
             with conn.cursor() as c:
                 c.execute('UPDATE posts SET notified=1 WHERE id=%s', (post_id,))
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def mark_contacted(post_id: str):
@@ -147,7 +202,7 @@ def mark_contacted(post_id: str):
                 c.execute('UPDATE posts SET contacted=1, contacted_at=%s WHERE id=%s', (now, post_id))
                 c.execute('INSERT INTO activity_log (timestamp, action, post_id) VALUES (%s,%s,%s)', (now, 'contacted', post_id))
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def unmark_contacted(post_id: str):
@@ -157,7 +212,7 @@ def unmark_contacted(post_id: str):
             with conn.cursor() as c:
                 c.execute('UPDATE posts SET contacted=0, contacted_at=NULL WHERE id=%s', (post_id,))
     finally:
-        conn.close()
+        return_conn(conn)
 
 # ── Settings ──
 
@@ -169,7 +224,7 @@ def get_setting(key, default=None):
             row = c.fetchone()
             return row[0] if row else default
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def set_setting(key, value):
@@ -180,7 +235,7 @@ def set_setting(key, value):
                 c.execute('INSERT INTO settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value',
                           (key, str(value)))
     finally:
-        conn.close()
+        return_conn(conn)
 
 # ── Subreddits ──
 
@@ -229,7 +284,7 @@ def get_event_keywords():
             c.execute('SELECT * FROM event_keywords ORDER BY created_at DESC')
             return [dict(r) for r in c.fetchall()]
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def add_event_keywords(names: list):
@@ -243,7 +298,7 @@ def add_event_keywords(names: list):
                     if name:
                         c.execute('INSERT INTO event_keywords (name, created_at) VALUES (%s,%s)', (name, now))
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def delete_event_keyword(kid: int):
@@ -253,7 +308,7 @@ def delete_event_keyword(kid: int):
             with conn.cursor() as c:
                 c.execute('DELETE FROM event_keywords WHERE id=%s', (kid,))
     finally:
-        conn.close()
+        return_conn(conn)
 
 
 def get_all_extra_keywords():

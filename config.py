@@ -15,11 +15,11 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 DASHBOARD_URL = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
 PORT = int(os.environ.get('PORT', 5000))
 
-# ── Scraper intervals (seconds) ──
+# ── Scraper intervals (seconds) - INCREASED to avoid rate limits ──
 PRIORITY_INTERVALS = {
-    'high':   5 * 60,
-    'medium': 15 * 60,
-    'low':    45 * 60,
+    'high':   15 * 60,  # Changed from 5 to 15 minutes
+    'medium': 30 * 60,  # Changed from 15 to 30 minutes
+    'low':    60 * 60,  # Changed from 45 to 60 minutes
 }
 
 # ── Validate on import — warn but never crash ──
