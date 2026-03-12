@@ -42,7 +42,7 @@ TICKET_FOCUSED_SUBS = {
 SKIP_PATTERNS = [
     # Event planning / organization
     'planning an event', 'organizing an event', 'hosting an event',
-    'looking for venue', 'suggestions for.*event', 'need recommendations for',
+    'looking for venue', 'suggestions for event', 'need recommendations for',
     'help me plan', 'how to organize', 'event management', 'event planning',
     'budget place', 'good place for', 'venue suggestions',
     
@@ -261,7 +261,8 @@ def fetch_subreddit(subreddit: str, extra_keywords: list, fast_mode: bool = Fals
     # Small delay between subreddits
     time.sleep(DELAY_BETWEEN_REQUESTS)
     
-    logger.info(f'r/{subreddit} complete: found {len(all_results)} relevant posts")
+    # FIXED: This line had the syntax error - now properly closed
+    logger.info(f'r/{subreddit} complete: found {len(all_results)} relevant posts')
     return all_results
 
 
