@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 from datetime import datetime
 
 DB_PATH = os.environ.get('DB_PATH', 'reticket.db')
@@ -46,13 +47,19 @@ def init_db():
             post_id TEXT
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS event_keywords (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at INTEGER
+        )
+    ''')
     conn.commit()
     conn.close()
 
 def upsert_post(post: dict):
     conn = get_conn()
     c = conn.cursor()
-    # Only insert if not exists — preserve contacted status
     c.execute('''
         INSERT OR IGNORE INTO posts
         (id, subreddit, title, body, author, permalink, post_type, ai_classified,
@@ -64,7 +71,6 @@ def upsert_post(post: dict):
         post['ups'], post['num_comments'], post['created_utc'],
         int(datetime.utcnow().timestamp())
     ))
-    # Update mutable fields
     c.execute('''
         UPDATE posts SET ups=?, num_comments=?, post_type=?, ai_classified=?
         WHERE id=? AND ai_classified=0
@@ -74,9 +80,7 @@ def upsert_post(post: dict):
 
 def get_unnotified_posts():
     conn = get_conn()
-    rows = conn.execute(
-        'SELECT * FROM posts WHERE notified=0 ORDER BY created_utc DESC'
-    ).fetchall()
+    rows = conn.execute('SELECT * FROM posts WHERE notified=0 ORDER BY created_utc DESC').fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -89,14 +93,8 @@ def mark_notified(post_id: str):
 def mark_contacted(post_id: str):
     conn = get_conn()
     now = int(datetime.utcnow().timestamp())
-    conn.execute(
-        'UPDATE posts SET contacted=1, contacted_at=? WHERE id=?',
-        (now, post_id)
-    )
-    conn.execute(
-        'INSERT INTO activity_log (timestamp, action, post_id) VALUES (?,?,?)',
-        (now, 'contacted', post_id)
-    )
+    conn.execute('UPDATE posts SET contacted=1, contacted_at=? WHERE id=?', (now, post_id))
+    conn.execute('INSERT INTO activity_log (timestamp, action, post_id) VALUES (?,?,?)', (now, 'contacted', post_id))
     conn.commit()
     conn.close()
 
@@ -129,29 +127,27 @@ def get_stats():
     buy = conn.execute("SELECT COUNT(*) FROM posts WHERE post_type='buy'").fetchone()[0]
     unclear = conn.execute("SELECT COUNT(*) FROM posts WHERE post_type='unclear'").fetchone()[0]
 
-    # Avg response time (contacted_at - created_utc) in seconds
     avg_row = conn.execute(
         'SELECT AVG(contacted_at - created_utc) FROM posts WHERE contacted=1 AND contacted_at IS NOT NULL'
     ).fetchone()[0]
     avg_response = int(avg_row) if avg_row else None
 
-    # Top subreddits
     top_subs = conn.execute(
         'SELECT subreddit, COUNT(*) as cnt FROM posts GROUP BY subreddit ORDER BY cnt DESC LIMIT 8'
     ).fetchall()
 
-    # Recent activity
     activity = conn.execute(
         '''SELECT a.timestamp, a.action, p.title, p.author, p.subreddit
            FROM activity_log a LEFT JOIN posts p ON a.post_id=p.id
            ORDER BY a.timestamp DESC LIMIT 10'''
     ).fetchall()
 
-    # Today's new posts
     today_start = int(datetime.utcnow().replace(hour=0, minute=0, second=0).timestamp())
-    today_new = conn.execute(
-        'SELECT COUNT(*) FROM posts WHERE fetched_at >= ?', (today_start,)
-    ).fetchone()[0]
+    today_new = conn.execute('SELECT COUNT(*) FROM posts WHERE fetched_at >= ?', (today_start,)).fetchone()[0]
+
+    all_sub_counts = conn.execute(
+        'SELECT subreddit, COUNT(*) as cnt FROM posts GROUP BY subreddit'
+    ).fetchall()
 
     conn.close()
     return {
@@ -163,7 +159,8 @@ def get_stats():
         'avg_response_seconds': avg_response,
         'top_subreddits': [dict(r) for r in top_subs],
         'activity': [dict(r) for r in activity],
-        'today_new': today_new
+        'today_new': today_new,
+        'sub_counts': {r['subreddit']: r['cnt'] for r in all_sub_counts}
     }
 
 def get_setting(key, default=None):
@@ -181,7 +178,6 @@ def set_setting(key, value):
 def get_subreddits():
     val = get_setting('subreddits')
     if val:
-        import json
         return json.loads(val)
     return [
         'chandigarhmarketplace','ConcertResale','Concerts','concerts_india',
@@ -191,5 +187,36 @@ def get_subreddits():
     ]
 
 def save_subreddits(subs: list):
-    import json
     set_setting('subreddits', json.dumps(subs))
+
+def get_event_keywords():
+    conn = get_conn()
+    rows = conn.execute('SELECT * FROM event_keywords ORDER BY created_at DESC').fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def add_event_keywords(names: list):
+    conn = get_conn()
+    now = int(datetime.utcnow().timestamp())
+    for name in names:
+        name = name.strip()
+        if name:
+            conn.execute('INSERT INTO event_keywords (name, created_at) VALUES (?,?)', (name, now))
+    conn.commit()
+    conn.close()
+
+def delete_event_keyword(kid: int):
+    conn = get_conn()
+    conn.execute('DELETE FROM event_keywords WHERE id=?', (kid,))
+    conn.commit()
+    conn.close()
+
+def get_all_extra_keywords():
+    events = get_event_keywords()
+    keywords = []
+    for e in events:
+        name = e['name'].lower()
+        words = [w.strip('|,.-()') for w in name.split() if len(w.strip('|,.-()')) > 3]
+        keywords.extend(words)
+        keywords.append(name)
+    return list(set(keywords))

@@ -2,7 +2,7 @@ import requests
 import os
 import time
 import logging
-from db import upsert_post, get_subreddits
+from db import upsert_post, get_subreddits, get_all_extra_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -12,37 +12,70 @@ BUY_KEYWORDS = [
     'wtb', 'want to buy', 'looking to buy', 'need ticket', 'need tickets',
     'looking for ticket', 'looking for tickets', 'iso ticket', 'iso tickets',
     'anyone selling', 'can anyone sell', 'wants to buy', 'need passes',
-    'looking for passes', 'need entry', 'need 1', 'need 2', 'need 3'
+    'looking for passes', 'need entry', 'buying ticket', 'buying tickets',
 ]
 SELL_KEYWORDS = [
     'wts', 'want to sell', 'selling ticket', 'selling tickets', 'for sale',
     'have ticket', 'have tickets', 'extra ticket', 'extra tickets',
-    'anyone buying', 'selling my ticket', 'selling my tickets',
-    'selling passes', 'selling entry', 'available ticket', 'selling 1',
-    'selling 2', 'selling 3', 'b24', 'b32', 'b48', 'pit ticket'
-]
-TICKET_KEYWORDS = [
-    'ticket', 'tickets', 'concert', 'show', 'fest', 'festival', 'event',
-    'gig', 'entry', 'pass', 'passes', 'wtb', 'wts', 'selling', 'fanpit',
-    'pit', 'standing', 'seated', 'vip', 'floor', 'balcony', 'stall',
-    'honey singh', 'diljit', 'ap dhillon', 'arijit', 'badshah', 'divine',
-    'nucleya', 'sunburn', 'lollapalooza', 'nh7', 'vh1', 'weekender',
-    'kanye', 'coldplay', 'ed sheeran', 'b24', 'fanpit'
+    'selling passes', 'selling entry', 'available ticket',
+    'selling 1', 'selling 2', 'selling 3', 'b24', 'b32', 'b48',
+    'pit ticket', 'pit pass', 'selling my ticket', 'selling my tickets',
 ]
 
+# STRICT ticket keywords — must be present for general subs
+STRICT_TICKET_KEYWORDS = [
+    'ticket', 'tickets', 'pass', 'passes', 'entry pass',
+    'wtb', 'wts', 'fanpit', 'fan pit',
+]
+
+# Extra context keywords — only count if combined with strict ones
+CONTEXT_KEYWORDS = [
+    'concert', 'show', 'fest', 'festival', 'gig', 'tour', 'live',
+    'nh7', 'lollapalooza', 'sunburn', 'vh1', 'weekender',
+    'honey singh', 'diljit', 'ap dhillon', 'arijit', 'badshah', 'divine',
+    'nucleya', 'kanye', 'coldplay', 'ed sheeran', 'calvin harris',
+    'black coffee', 'keinemusik', 'ar rahman', 'sonu nigam',
+]
+
+# These subs are 100% ticket-focused — show ALL posts
 TICKET_FOCUSED_SUBS = {
     'concertticketsindia', 'ticketresellingindia', 'concertresale',
-    'ticketresale', 'concerts_india', 'concertsindia_', 'transactiontickets'
+    'ticketresale', 'concerts_india', 'concertsindia_', 'transactiontickets',
+    'ticketexchange', 'edmtickets',
 }
 
-HEADERS = {'User-Agent': 'ReticketLeads/1.0 (personal ticket lead tool)'}
+# These subs need strict filtering — don't show everything
+GENERAL_SUBS = {
+    'delhi', 'delhi_marketplace', 'chandigarhmarketplace', 'mumbai',
+    'bangalore', 'pune', 'hyderabad', 'india', 'indiamarketplace',
+    'creditcardsindia', 'indianhiphopheads', 'concerts', 'tickets',
+}
+
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
 
 
-def is_ticket_post(post: dict, subreddit: str) -> bool:
-    if subreddit.lower() in TICKET_FOCUSED_SUBS:
-        return True
+def is_ticket_post(post: dict, subreddit: str, extra_keywords: list) -> bool:
+    sub_lower = subreddit.lower()
     text = (post.get('title', '') + ' ' + post.get('selftext', '')).lower()
-    return any(k in text for k in TICKET_KEYWORDS)
+
+    # Ticket-focused subs: show all posts
+    if sub_lower in TICKET_FOCUSED_SUBS:
+        return True
+
+    # General subs: require a strict ticket keyword
+    has_strict = any(k in text for k in STRICT_TICKET_KEYWORDS)
+    if not has_strict:
+        return False
+
+    # Also require at least one context keyword OR a buy/sell keyword
+    has_context = any(k in text for k in CONTEXT_KEYWORDS + extra_keywords)
+    has_buy_sell = any(k in text for k in BUY_KEYWORDS + SELL_KEYWORDS)
+
+    return has_context or has_buy_sell
 
 
 def classify_keyword(post: dict) -> str:
@@ -57,16 +90,20 @@ def classify_keyword(post: dict) -> str:
 
 
 def classify_with_ai(posts: list) -> dict:
-    """Call Claude API to classify a batch of unclear posts. Returns {id: type}"""
     if not ANTHROPIC_API_KEY or not posts:
         return {}
     batch = posts[:20]
     prompt = (
-        'Classify each Reddit post as "buy" (person wants to buy tickets), '
-        '"sell" (person wants to sell tickets), or "skip" (not about buying/selling tickets).\n\n'
+        'You are filtering Reddit posts for a concert ticket marketplace in India.\n'
+        'Classify each post as:\n'
+        '- "buy": person wants to BUY concert/event tickets\n'
+        '- "sell": person wants to SELL concert/event tickets\n'
+        '- "skip": NOT about buying or selling tickets (general discussion, unrelated items, questions about concerts in general)\n\n'
+        'Be strict: "Why are Indian concerts chaotic?" = skip. "Selling phone cooler" = skip. '
+        '"WTS Calvin Harris ticket" = sell. "Need 2 Diljit tickets" = buy.\n\n'
         'Posts:\n' +
-        str([{'id': p['id'], 'text': (p['title'] + ' ' + p.get('selftext', ''))[:200]} for p in batch]) +
-        '\n\nReply ONLY with a JSON object like: {"id1": "buy", "id2": "sell", ...}'
+        str([{'id': p['id'], 'text': (p['title'] + ' ' + p.get('body', ''))[:200]} for p in batch]) +
+        '\n\nReply ONLY with JSON: {"post_id": "buy"|"sell"|"skip", ...}'
     )
     try:
         res = requests.post(
@@ -93,8 +130,7 @@ def classify_with_ai(posts: list) -> dict:
     return {}
 
 
-def fetch_subreddit(subreddit: str) -> list:
-    """Fetch latest posts from a subreddit. Returns list of new post dicts."""
+def fetch_subreddit(subreddit: str, extra_keywords: list) -> list:
     url = f'https://www.reddit.com/r/{subreddit}/new.json?limit=100'
     try:
         res = requests.get(url, headers=HEADERS, timeout=10)
@@ -104,12 +140,15 @@ def fetch_subreddit(subreddit: str) -> list:
         if res.status_code == 403:
             logger.warning(f'r/{subreddit} private/banned (403)')
             return []
+        if res.status_code == 429:
+            logger.warning(f'r/{subreddit} rate limited, sleeping 10s')
+            time.sleep(10)
+            return []
         res.raise_for_status()
         data = res.json()
         posts = [c['data'] for c in data.get('data', {}).get('children', [])]
-        ticket_posts = [p for p in posts if is_ticket_post(p, subreddit)]
+        ticket_posts = [p for p in posts if is_ticket_post(p, subreddit, extra_keywords)]
 
-        # Classify
         unclear = []
         result = []
         for p in ticket_posts:
@@ -131,13 +170,19 @@ def fetch_subreddit(subreddit: str) -> list:
                 unclear.append(post_dict)
             result.append(post_dict)
 
-        # AI classify unclear ones
+        # AI classify unclear ones — mark "skip" posts for removal
         if unclear and ANTHROPIC_API_KEY:
             ai_results = classify_with_ai(unclear)
+            keep = []
             for post_dict in result:
-                if post_dict['id'] in ai_results and ai_results[post_dict['id']] != 'skip':
-                    post_dict['post_type'] = ai_results[post_dict['id']]
+                ai_label = ai_results.get(post_dict['id'])
+                if ai_label == 'skip':
+                    continue  # drop irrelevant posts
+                if ai_label in ('buy', 'sell'):
+                    post_dict['post_type'] = ai_label
                     post_dict['ai_classified'] = 1
+                keep.append(post_dict)
+            result = keep
 
         return result
 
@@ -147,16 +192,16 @@ def fetch_subreddit(subreddit: str) -> list:
 
 
 def scrape_all() -> list:
-    """Scrape all subreddits. Returns list of newly inserted post dicts."""
     subreddits = get_subreddits()
+    extra_keywords = get_all_extra_keywords()
     new_posts = []
 
     for sub in subreddits:
-        posts = fetch_subreddit(sub)
+        posts = fetch_subreddit(sub, extra_keywords)
         for post in posts:
             upsert_post(post)
             new_posts.append(post)
-        time.sleep(0.5)  # be polite to Reddit
+        time.sleep(1)
 
     logger.info(f'Scraped {len(new_posts)} ticket posts from {len(subreddits)} subreddits')
     return new_posts

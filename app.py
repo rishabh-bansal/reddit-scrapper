@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import time
+import requests as req
 from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
-# Init DB immediately at startup — before any requests
 db.init_db()
 
 DASHBOARD_URL = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
@@ -63,35 +63,80 @@ def unmark_contacted(post_id):
 
 @app.route('/api/scrape', methods=['POST'])
 def manual_scrape():
-    """Trigger a manual scrape"""
     threading.Thread(target=run_scrape_cycle, daemon=True).start()
     return jsonify({'ok': True, 'message': 'Scrape triggered'})
 
-@app.route('/api/debug')
-def debug():
-    """Test Reddit fetch for one subreddit and return raw result"""
-    import requests as req
-    sub = request.args.get('sub', 'ConcertTicketsIndia')
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-    }
+# ── Event Keywords ──
+
+@app.route('/api/events', methods=['GET'])
+def get_events():
+    return jsonify(db.get_event_keywords())
+
+@app.route('/api/events', methods=['POST'])
+def add_events():
+    data = request.json
+    names = data.get('names', [])
+    if not names:
+        return jsonify({'ok': False, 'error': 'No names provided'}), 400
+    db.add_event_keywords(names)
+    return jsonify({'ok': True, 'added': len(names)})
+
+@app.route('/api/events/<int:kid>', methods=['DELETE'])
+def delete_event(kid):
+    db.delete_event_keyword(kid)
+    return jsonify({'ok': True})
+
+# ── Status Check ──
+
+@app.route('/api/status')
+def status():
+    results = {}
+
+    # Reddit check
     try:
-        res = req.get(f'https://www.reddit.com/r/{sub}/new.json?limit=5', headers=headers, timeout=10)
-        return jsonify({
-            'status': res.status_code,
-            'sub': sub,
-            'post_count': len(res.json().get('data', {}).get('children', [])),
-            'first_title': res.json().get('data', {}).get('children', [{}])[0].get('data', {}).get('title', 'none') if res.json().get('data', {}).get('children') else 'empty',
-            'subreddits_in_db': db.get_subreddits()
-        })
+        r = req.get('https://www.reddit.com/r/ConcertTicketsIndia/new.json?limit=1',
+                    headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+        results['reddit'] = {'ok': r.status_code == 200, 'status': r.status_code}
     except Exception as e:
-        return jsonify({'error': str(e), 'subreddits_in_db': db.get_subreddits()})
+        results['reddit'] = {'ok': False, 'error': str(e)}
 
+    # Telegram check
+    telegram_token = os.environ.get('TELEGRAM_TOKEN', '')
+    telegram_chat = os.environ.get('TELEGRAM_CHAT_ID', '')
+    if telegram_token:
+        try:
+            r = req.get(f'https://api.telegram.org/bot{telegram_token}/getMe', timeout=8)
+            data = r.json()
+            results['telegram'] = {
+                'ok': data.get('ok', False),
+                'bot_name': data.get('result', {}).get('username', ''),
+                'chat_configured': bool(telegram_chat)
+            }
+        except Exception as e:
+            results['telegram'] = {'ok': False, 'error': str(e)}
+    else:
+        results['telegram'] = {'ok': False, 'error': 'TELEGRAM_TOKEN not set'}
 
+    # Claude AI check
+    anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    results['claude'] = {
+        'ok': bool(anthropic_key),
+        'configured': bool(anthropic_key)
+    }
+
+    # DB check
+    try:
+        stats = db.get_stats()
+        results['database'] = {'ok': True, 'total_posts': stats['total']}
+    except Exception as e:
+        results['database'] = {'ok': False, 'error': str(e)}
+
+    return jsonify(results)
+
+@app.route('/api/health')
+def health():
     return jsonify({'status': 'ok', 'time': datetime.utcnow().isoformat()})
 
-# Self-ping to prevent Render free tier sleeping
 @app.route('/ping')
 def ping():
     return 'pong'
@@ -99,53 +144,38 @@ def ping():
 # ── Background Jobs ──
 
 def run_scrape_cycle():
-    """Single scrape + notify cycle"""
     try:
         logger.info('Starting scrape cycle...')
         scraper.scrape_all()
-
-        # Notify unread posts
         unnotified = db.get_unnotified_posts()
         for post in unnotified:
             bot.send_post_alert(post)
             db.mark_notified(post['id'])
-            time.sleep(0.3)  # avoid Telegram flood limits
-
+            time.sleep(0.3)
         logger.info(f'Notified {len(unnotified)} new posts')
     except Exception as e:
         logger.error(f'Scrape cycle error: {e}')
 
-
 def scrape_loop():
-    """Main background loop — runs every 61 seconds"""
-    time.sleep(5)  # wait for app to fully start
+    time.sleep(5)
     while True:
         run_scrape_cycle()
         time.sleep(61)
 
-
 def self_ping_loop():
-    """Ping self every 10 minutes to prevent Render free tier sleeping"""
     time.sleep(30)
     while True:
         try:
-            import requests as req
             req.get(f'{DASHBOARD_URL}/ping', timeout=5)
-            logger.debug('Self-ping sent')
         except:
             pass
-        time.sleep(600)  # every 10 minutes
-
+        time.sleep(600)
 
 def scheduler_loop():
-    """Handles daily summary and weekly stats"""
     last_daily = None
     last_weekly = None
-
     while True:
         now = datetime.now()
-
-        # Daily summary at 8am
         today_str = now.strftime('%Y-%m-%d')
         if now.hour == 8 and last_daily != today_str:
             stats = db.get_stats()
@@ -154,20 +184,12 @@ def scheduler_loop():
             new_today_filtered = [p for p in new_today if p['fetched_at'] >= today_start]
             bot.send_daily_summary(stats, new_today_filtered)
             last_daily = today_str
-            logger.info('Daily summary sent')
-
-        # Weekly stats on Monday at 9am
         week_str = now.strftime('%Y-W%W')
         if now.weekday() == 0 and now.hour == 9 and last_weekly != week_str:
             stats = db.get_stats()
             bot.send_weekly_stats(stats)
             last_weekly = week_str
-            logger.info('Weekly stats sent')
-
         time.sleep(60)
-
-
-# ── Startup ──
 
 def start_background_threads():
     threading.Thread(target=scrape_loop, daemon=True).start()
@@ -175,15 +197,11 @@ def start_background_threads():
     threading.Thread(target=scheduler_loop, daemon=True).start()
     logger.info('Background threads started')
 
-
 if __name__ == '__main__':
     db.init_db()
     start_background_threads()
-
-    # Send startup Telegram message
     if os.environ.get('TELEGRAM_TOKEN'):
         time.sleep(2)
         bot.send_startup_message(DASHBOARD_URL)
-
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
