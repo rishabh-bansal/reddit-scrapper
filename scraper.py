@@ -1,8 +1,12 @@
 import requests
 import os
 import time
+import random
 import logging
 from db import upsert_post, get_subreddits, get_all_extra_keywords
+
+# Re-export so app.py can import it from here
+__all__ = ['fetch_subreddit', 'scrape_all', 'upsert_post']
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +55,20 @@ GENERAL_SUBS = {
     'creditcardsindia', 'indianhiphopheads', 'concerts', 'tickets',
 }
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
-    'Accept-Language': 'en-US,en;q=0.9',
-}
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+]
+
+def get_headers():
+    return {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+    }
 
 
 def is_ticket_post(post: dict, subreddit: str, extra_keywords: list) -> bool:
@@ -132,8 +145,10 @@ def classify_with_ai(posts: list) -> dict:
 
 def fetch_subreddit(subreddit: str, extra_keywords: list) -> list:
     url = f'https://www.reddit.com/r/{subreddit}/new.json?limit=100'
+    # Random jitter so requests never look like a robot clock
+    time.sleep(random.uniform(2, 5))
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=get_headers(), timeout=15)
         if res.status_code == 404:
             logger.warning(f'r/{subreddit} not found (404)')
             return []
@@ -141,8 +156,9 @@ def fetch_subreddit(subreddit: str, extra_keywords: list) -> list:
             logger.warning(f'r/{subreddit} private/banned (403)')
             return []
         if res.status_code == 429:
-            logger.warning(f'r/{subreddit} rate limited, sleeping 10s')
-            time.sleep(10)
+            retry_after = int(res.headers.get('Retry-After', 120))
+            logger.warning(f'r/{subreddit} rate limited — sleeping {retry_after}s')
+            time.sleep(retry_after)
             return []
         res.raise_for_status()
         data = res.json()

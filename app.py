@@ -63,8 +63,9 @@ def unmark_contacted(post_id):
 
 @app.route('/api/scrape', methods=['POST'])
 def manual_scrape():
-    threading.Thread(target=run_scrape_cycle, daemon=True).start()
-    return jsonify({'ok': True, 'message': 'Scrape triggered'})
+    """Trigger a manual scrape of ONE subreddit (next in rotation)"""
+    threading.Thread(target=scrape_next_sub, daemon=True).start()
+    return jsonify({'ok': True, 'message': 'Scrape triggered for next subreddit in rotation'})
 
 # ── Event Keywords ──
 
@@ -92,10 +93,13 @@ def delete_event(kid):
 def status():
     results = {}
 
-    # Reddit check
+    # Reddit check — single lightweight request
     try:
-        r = req.get('https://www.reddit.com/r/ConcertTicketsIndia/new.json?limit=1',
-                    headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+        r = req.get(
+            'https://www.reddit.com/r/ConcertTicketsIndia/new.json?limit=1',
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; reticket/1.0)'},
+            timeout=8
+        )
         results['reddit'] = {'ok': r.status_code == 200, 'status': r.status_code}
     except Exception as e:
         results['reddit'] = {'ok': False, 'error': str(e)}
@@ -119,10 +123,7 @@ def status():
 
     # Claude AI check
     anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    results['claude'] = {
-        'ok': bool(anthropic_key),
-        'configured': bool(anthropic_key)
-    }
+    results['claude'] = {'ok': bool(anthropic_key), 'configured': bool(anthropic_key)}
 
     # DB check
     try:
@@ -131,38 +132,82 @@ def status():
     except Exception as e:
         results['database'] = {'ok': False, 'error': str(e)}
 
-    return jsonify(results)
+    # Scraper status
+    results['scraper'] = {
+        'current_index': scraper_state['current_index'],
+        'last_scraped_sub': scraper_state['last_scraped_sub'],
+        'last_scraped_at': scraper_state['last_scraped_at'],
+        'interval_seconds': INTER_SUB_DELAY,
+        'subs_total': len(db.get_subreddits())
+    }
 
-@app.route('/api/health')
-def health():
-    return jsonify({'status': 'ok', 'time': datetime.utcnow().isoformat()})
+    return jsonify(results)
 
 @app.route('/ping')
 def ping():
     return 'pong'
 
-# ── Background Jobs ──
+# ── Scraper State ──
 
-def run_scrape_cycle():
+# ONE subreddit every 3 minutes = safe and sustainable
+# 13 subs × 3 min = full cycle every ~39 minutes
+INTER_SUB_DELAY = 3 * 60  # seconds between each subreddit fetch
+
+scraper_state = {
+    'current_index': 0,
+    'last_scraped_sub': None,
+    'last_scraped_at': None,
+}
+
+def scrape_next_sub():
+    """Fetch exactly ONE subreddit, advance the rotation index."""
     try:
-        logger.info('Starting scrape cycle...')
-        scraper.scrape_all()
+        subs = db.get_subreddits()
+        if not subs:
+            return
+
+        idx = scraper_state['current_index'] % len(subs)
+        sub = subs[idx]
+
+        logger.info(f'Scraping [{idx+1}/{len(subs)}] r/{sub}')
+        extra_keywords = db.get_all_extra_keywords()
+        posts = scraper.fetch_subreddit(sub, extra_keywords)
+
+        new_count = 0
+        for post in posts:
+            scraper.upsert_post(post)
+            new_count += 1
+
+        # Notify new unread posts
         unnotified = db.get_unnotified_posts()
         for post in unnotified:
             bot.send_post_alert(post)
             db.mark_notified(post['id'])
             time.sleep(0.3)
-        logger.info(f'Notified {len(unnotified)} new posts')
+
+        scraper_state['current_index'] = (idx + 1) % len(subs)
+        scraper_state['last_scraped_sub'] = sub
+        scraper_state['last_scraped_at'] = datetime.utcnow().isoformat()
+
+        logger.info(f'r/{sub}: {new_count} ticket posts stored. Next: r/{subs[(idx+1) % len(subs)]} in {INTER_SUB_DELAY//60}m')
+
     except Exception as e:
-        logger.error(f'Scrape cycle error: {e}')
+        logger.error(f'scrape_next_sub error: {e}')
+
 
 def scrape_loop():
-    time.sleep(5)
+    """
+    Trickle scraper — one subreddit every 3 minutes.
+    Never hammers Reddit. Full cycle = ~39 min for 13 subs.
+    """
+    time.sleep(10)  # let app fully boot first
     while True:
-        run_scrape_cycle()
-        time.sleep(61)
+        scrape_next_sub()
+        time.sleep(INTER_SUB_DELAY)
+
 
 def self_ping_loop():
+    """Ping self every 10 minutes to prevent Render free tier sleeping."""
     time.sleep(30)
     while True:
         try:
@@ -171,7 +216,9 @@ def self_ping_loop():
             pass
         time.sleep(600)
 
+
 def scheduler_loop():
+    """Daily summary at 8am, weekly stats Monday 9am."""
     last_daily = None
     last_weekly = None
     while True:
@@ -191,11 +238,13 @@ def scheduler_loop():
             last_weekly = week_str
         time.sleep(60)
 
+
 def start_background_threads():
     threading.Thread(target=scrape_loop, daemon=True).start()
     threading.Thread(target=self_ping_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    logger.info('Background threads started')
+    logger.info(f'Background threads started. Scraping 1 sub every {INTER_SUB_DELAY//60} minutes.')
+
 
 if __name__ == '__main__':
     db.init_db()
