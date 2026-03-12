@@ -561,10 +561,37 @@ let knownIds = new Set(JSON.parse(localStorage.getItem('rt_known_ids') || '[]'))
 let globalSubCounts = {};
 let lastStatusData = {};
 
-// ── FETCH WITH TIMEOUT ──
+// ── API CACHE ──
+const apiCache = {
+  data: {},
+  timestamp: {}
+};
+const API_CACHE_TTL = 5000; // 5 seconds
+
+// ── POSTS CACHE ──
+let postsCache = {
+  data: null,
+  timestamp: 0,
+  filter: null,
+  hideContacted: null
+};
+const POSTS_CACHE_TTL = 30000; // 30 seconds
+
+// ── FETCH WITH TIMEOUT AND CACHE ──
 async function apiFetch(path, opts = {}) {
+  const cacheKey = path + JSON.stringify(opts);
+  const now = Date.now();
+  
+  // Check cache for GET requests
+  if ((!opts.method || opts.method === 'GET') && 
+      apiCache.data[cacheKey] && 
+      now - apiCache.timestamp[cacheKey] < API_CACHE_TTL) {
+    console.log('📦 Using cached response for', path);
+    return apiCache.data[cacheKey];
+  }
+  
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+  const timeout = setTimeout(() => controller.abort(), 8000); // 8 second timeout
   
   try {
     const res = await fetch(API + path, {
@@ -573,8 +600,17 @@ async function apiFetch(path, opts = {}) {
       headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) }
     });
     clearTimeout(timeout);
+    
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    const data = await res.json();
+    
+    // Cache GET responses
+    if (!opts.method || opts.method === 'GET') {
+      apiCache.data[cacheKey] = data;
+      apiCache.timestamp[cacheKey] = now;
+    }
+    
+    return data;
   } catch (e) {
     clearTimeout(timeout);
     console.error(`API fetch failed for ${path}:`, e);
@@ -617,29 +653,61 @@ async function checkStatus() {
   }
 }
 
-// ── LOAD POSTS ──
-async function loadPosts() {
+// ── OPTIMIZED POST LOADING ──
+async function loadPosts(forceRefresh = false) {
   console.log('📡 Fetching posts...');
-  const url = `/api/posts?type=${activeFilter}&hide_contacted=${hideContacted}&limit=300`;
-  console.log('GET', url);
+  setLoading(true);
   
-  const posts = await apiFetch(url);
-  console.log(`📦 Received ${posts.length} posts`);
+  const cacheKey = `${activeFilter}-${hideContacted}`;
+  const now = Date.now();
   
-  const prevCount = allPosts.length;
-  allPosts = posts;
-  
-  const newPosts = posts.filter(p => !knownIds.has(p.id));
-  if (newPosts.length > 0 && prevCount > 0) { 
-    showBanner(newPosts.length); 
-    playPing(); 
+  // Check cache first
+  if (!forceRefresh && 
+      postsCache.data && 
+      postsCache.filter === cacheKey &&
+      (now - postsCache.timestamp) < POSTS_CACHE_TTL) {
+    console.log('📦 Using cached posts');
+    allPosts = postsCache.data;
+    renderPosts();
+    document.getElementById('lastRefreshTime').textContent = 'Cached ' + new Date().toLocaleTimeString();
+    setLoading(false);
+    return;
   }
   
-  newPosts.forEach(p => knownIds.add(p.id));
-  localStorage.setItem('rt_known_ids', JSON.stringify([...knownIds].slice(-2000)));
-  
-  renderPosts();
-  document.getElementById('lastRefreshTime').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  try {
+    const url = `/api/posts?type=${activeFilter}&hide_contacted=${hideContacted}&limit=100`;
+    console.log('GET', url);
+    
+    const posts = await apiFetch(url);
+    console.log(`📦 Received ${posts.length} posts`);
+    
+    // Update cache
+    postsCache = {
+      data: posts,
+      timestamp: now,
+      filter: cacheKey
+    };
+    
+    allPosts = posts;
+    
+    const newPosts = posts.filter(p => !knownIds.has(p.id));
+    if (newPosts.length > 0 && allPosts.length > 0) { 
+      showBanner(newPosts.length); 
+      playPing(); 
+    }
+    
+    newPosts.forEach(p => knownIds.add(p.id));
+    localStorage.setItem('rt_known_ids', JSON.stringify([...knownIds].slice(-2000)));
+    
+    renderPosts();
+    document.getElementById('lastRefreshTime').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    
+  } catch (e) {
+    console.error('❌ Failed to load posts:', e);
+    showError('Failed to load posts. ' + e.message);
+  } finally {
+    setLoading(false);
+  }
 }
 
 // ── LOAD STATS ──
@@ -960,13 +1028,13 @@ function setFilter(type, btn) {
   activeFilter = type;
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  loadPosts();
+  loadPosts(true); // Force refresh when filter changes
 }
 
 function toggleHideContacted() {
   hideContacted = !hideContacted;
   document.getElementById('contactedToggle').classList.toggle('active', hideContacted);
-  loadPosts();
+  loadPosts(true); // Force refresh when filter changes
 }
 
 async function triggerScrape() {
@@ -974,8 +1042,9 @@ async function triggerScrape() {
   document.getElementById('refreshLabel').textContent = 'Fetching...';
   try {
     await apiFetch('/api/scrape', { method: 'POST' });
-    await new Promise(r => setTimeout(r, 3000));
-    await loadPosts(); await loadStats();
+    await new Promise(r => setTimeout(r, 1000));
+    await loadPosts(true); // Force refresh after scrape
+    await loadStats();
   } catch(e) {
     console.warn('Scrape trigger failed:', e);
   }
@@ -1071,6 +1140,17 @@ function setLoading(show) {
   document.getElementById('loadingWrap').style.display = show ? 'block' : 'none'; 
 }
 
+function showError(message) {
+  document.getElementById('loadingWrap').style.display = 'none';
+  document.getElementById('emptyWrap').innerHTML = `
+    <div class="e-icon">⚠️</div>
+    <div class="e-title">Error Loading Data</div>
+    <div class="e-sub">${message}</div>
+    <button onclick="init()" style="margin-top:16px;padding:8px 16px;background:var(--accent);color:white;border:none;border-radius:4px;font-family:JetBrains Mono,monospace;cursor:pointer;">↻ Retry</button>
+  `;
+  document.getElementById('emptyWrap').style.display = 'block';
+}
+
 // ── DM PRE-FILL ──
 function buildDmUrl(post) {
   const base = `https://www.reddit.com/message/compose/?to=${encodeURIComponent(post.author)}`;
@@ -1105,7 +1185,7 @@ Would love to have you on there. Happy to answer any Qs!`;
   if (text.includes('vip')) zones.push('VIP');
   if (text.includes('bronze')) zones.push('Bronze');
 
-  const quantities = text.match(/([1-9])\s*ticket/);
+  const quantities = text.match(/\b([1-9])\s*ticket/);
   const qty = quantities ? quantities[1] : null;
 
   let opener = `Yo! Saw you're looking for tickets`;
@@ -1148,67 +1228,37 @@ function formatDuration(s) {
 }
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-// ── INIT WITH PROPER ERROR HANDLING ──
+// ── OPTIMIZED INIT ──
 async function init() {
   console.log('🚀 Reticket dashboard initializing...');
-  setLoading(true);
   
-  // Try status, but don't block
-  try {
-    await checkStatus();
-    console.log('✓ Status OK');
-  } catch (e) {
-    console.warn('⚠️ Status check failed:', e);
-  }
+  // Load posts FIRST (fast, uses cache)
+  await loadPosts();
   
-  // Load subreddits
-  try {
-    await loadSubreddits();
-    console.log('✓ Subreddits loaded');
-  } catch (e) {
-    console.warn('⚠️ Subreddits failed:', e);
-  }
+  // Load everything else in background
+  setTimeout(async () => {
+    try {
+      await checkStatus();
+      await loadSubreddits();
+      await loadStats();
+    } catch (e) {
+      console.warn('Background loading failed:', e);
+    }
+  }, 100);
   
-  // LOAD POSTS - this is the critical one
-  try {
-    await loadPosts();
-    console.log('✓ Posts loaded successfully');
-  } catch (e) {
-    console.error('❌ Failed to load posts:', e);
-    document.getElementById('loadingWrap').style.display = 'none';
-    document.getElementById('emptyWrap').innerHTML = `
-      <div class="e-icon">⚠️</div>
-      <div class="e-title">Failed to Load Posts</div>
-      <div class="e-sub">${e.message || 'Unknown error'}</div>
-      <button onclick="init()" style="margin-top:16px;padding:8px 16px;background:var(--accent);color:white;border:none;border-radius:4px;font-family:JetBrains Mono,monospace;cursor:pointer;">↻ Retry</button>
-    `;
-    document.getElementById('emptyWrap').style.display = 'block';
-    return; // Stop here if posts fail
-  }
-  
-  // Load stats (optional)
-  try {
-    await loadStats();
-    console.log('✓ Stats loaded');
-  } catch (e) {
-    console.warn('⚠️ Stats failed:', e);
-  }
-  
-  setLoading(false);
+  // Set up periodic refresh (less frequent)
+  setInterval(async () => { 
+    try {
+      await loadPosts(); 
+      await loadStats(); 
+    } catch (e) {
+      console.warn('Periodic refresh failed:', e);
+    }
+  }, 30000); // Refresh every 30 seconds
 }
 
 // Start everything
 init();
-
-// Set up periodic refresh
-setInterval(async () => { 
-  try {
-    await loadPosts(); 
-    await loadStats(); 
-  } catch (e) {
-    console.warn('Periodic refresh failed:', e);
-  }
-}, 61000);
 </script>
 </body>
 </html>
