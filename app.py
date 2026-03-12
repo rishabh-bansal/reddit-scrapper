@@ -209,6 +209,16 @@ def add_events():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/events', methods=['DELETE'])
+def clear_all_events():
+    try:
+        db.clear_all_event_keywords()
+        _cache_clear_prefix('events')
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/events/<int:kid>', methods=['DELETE'])
 def delete_event(kid):
     try:
