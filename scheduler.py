@@ -89,7 +89,7 @@ def scrape_due_subs():
                     next_times[name] = time.time() + retry_delay
                     logger.error(f'Scrape error r/{name}: {e} — retry in {retry_delay}s')
 
-                time.sleep(1)
+                time.sleep(4)  # avoid Reddit rate limiting between subreddits
 
         if state['first_boot_done']:
             threading.Thread(target=_send_pending_notifications, daemon=True).start()
