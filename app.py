@@ -259,7 +259,6 @@ def startup():
     
     # Initialize database connection pool
     logger.info('Initializing database connection pool...')
-    db.init_db_pool()
     db_ok = db.init_db()
     if not db_ok:
         logger.error('⚠ App started but DB is unreachable. Check DATABASE_URL.')
