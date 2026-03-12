@@ -321,7 +321,7 @@ header {
   <div class="header-status-row">
     <div class="status-pill loading" id="statusReddit"><div class="dot"></div><span>Reddit</span></div>
     <div class="status-pill loading" id="statusTelegram"><div class="dot"></div><span>Telegram</span></div>
-    <div class="status-pill loading" id="statusClaude"><div class="dot"></div><span>Gemini AI</span></div>
+    <div class="status-pill loading" id="statusClaude"><div class="dot"></div><span>Groq AI</span></div>
     <div class="status-pill loading" id="statusDB"><div class="dot"></div><span>DB</span></div>
   </div>
   <div class="header-right">
@@ -521,7 +521,7 @@ header {
         <div class="mobile-status-val"><div class="mobile-status-dot loading" id="mDotTelegram"></div><span id="mLabelTelegram">Checking...</span></div>
       </div>
       <div class="mobile-status-item">
-        <span class="mobile-status-label">Gemini AI</span>
+        <span class="mobile-status-label">Groq AI</span>
         <div class="mobile-status-val"><div class="mobile-status-dot loading" id="mDotClaude"></div><span id="mLabelClaude">Checking...</span></div>
       </div>
       <div class="mobile-status-item">
@@ -629,7 +629,7 @@ function applyStatus(s) {
   };
   setPill('statusReddit', s.reddit?.ok, s.reddit?.ok ? 'Reddit ✓' : 'Reddit ✗');
   setPill('statusTelegram', s.telegram?.ok, s.telegram?.ok ? `@${s.telegram.bot_name} ✓` : (s.telegram?.error?.includes('not set') ? 'Telegram — no token' : 'Telegram ✗'));
-  setPill('statusClaude', s.claude?.ok, s.claude?.ok ? 'Gemini AI ✓' : 'Gemini AI — no key');
+  setPill('statusClaude', s.claude?.ok, s.claude?.ok ? 'Groq AI ✓' : 'Groq AI — no key');
   setPill('statusDB', s.database?.ok, s.database?.ok ? `DB ✓` : 'DB ✗');
 
   // Mobile status dots
