@@ -7,7 +7,9 @@ from config import GEMINI_API_KEY
 
 logger = logging.getLogger(__name__)
 
-GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'
+# Use the correct model that's enabled in your account
+GEMINI_MODEL = 'gemini-2.5-flash'  # Changed from gemini-2.0-flash
+GEMINI_URL = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
 
 # Expanded keyword lists for better filtering
 BUY_KEYWORDS = [
@@ -35,24 +37,26 @@ SKIP_PATTERNS = [
     r'planning an? event', r'organizing an? event', r'hosting an? event',
     r'looking for venue', r'suggestions for.*event', r'need recommendations for',
     r'help me plan', r'how to organize', r'event management', r'event planning',
+    r'budget place', r'good place for', r'vehicle suggestions',
+    
+    # Non-ticket items for sale
+    r'selling.*monitor', r'selling.*laptop', r'selling.*phone', r'selling.*camera',
+    r'selling.*furniture', r'selling.*bike', r'selling.*car', r'selling.*house',
+    r'wts.*monitor', r'wts.*laptop', r'wts.*phone', r'for sale.*monitor',
+    r'for sale.*laptop', r'used.*monitor', r'used.*laptop', r'4k monitor',
     
     # General discussion
     r'what do you think', r'your thoughts', r'opinion on', r'is it worth',
     r'has anyone been', r'anyone attended', r'review of', r'experience with',
     r'how was the', r'did you go', r'who is going', r'who\'s going',
-    
-    # Non-ticket items
-    r'selling.*monitor', r'selling.*laptop', r'selling.*phone', r'selling.*camera',
-    r'selling.*furniture', r'selling.*bike', r'selling.*car', r'selling.*house',
-    r'wts.*monitor', r'wts.*laptop', r'wts.*phone', r'for sale.*monitor',
-    r'for sale.*laptop', r'used.*monitor', r'used.*laptop',
+    r'any updates on', r'any news about', r'when is the',
     
     # Poetry/creative
-    r'poem', r'poetry', r'story', r'fiction', r'creative writing',
+    r'poem', r'poetry', r'story', r'fiction', r'creative writing', r'original work',
     
-    # Questions about events
-    r'when is', r'what time', r'what date', r'how to get tickets',
-    r'where to buy', r'ticket price', r'cost of tickets', r'is it sold out',
+    # Questions about tickets (not buying/selling)
+    r'how to get tickets', r'where to buy tickets', r'ticket price', r'cost of tickets',
+    r'is it sold out', r'are tickets available', r'booking open', r'when will tickets release',
 ]
 
 def is_available() -> bool:
@@ -79,7 +83,7 @@ def classify_batch(posts: list, event_keywords: list) -> dict:
         batch_results = _call_gemini(batch, events_hint)
         results.update(batch_results)
         if i + batch_size < len(posts):
-            time.sleep(1)  # Stay under 15 req/min free tier
+            time.sleep(1)  # Stay under rate limits
 
     return results
 
@@ -184,7 +188,7 @@ def _enhanced_keyword_filter(post: dict) -> str:
         sell_count = sum(1 for kw in SELL_KEYWORDS if kw in text)
         if buy_count > sell_count:
             return 'buy'
-        if sell_count > buy_count:
+        if sell_count > sell_count:
             return 'sell'
         return 'unclear'
     
