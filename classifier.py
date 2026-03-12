@@ -120,7 +120,7 @@ def _call_gemini(batch: list, events_hint: str) -> dict:
             res = requests.post(
                 f'{GEMINI_URL}?key={GEMINI_API_KEY}',
                 json={'contents': [{'parts': [{'text': prompt}]}],
-                      'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 512}},
+                      'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 1024}},
                 timeout=30
             )
             if res.status_code == 429:
@@ -135,13 +135,30 @@ def _call_gemini(batch: list, events_hint: str) -> dict:
             text = res.json()['candidates'][0]['content']['parts'][0]['text']
             # Strip markdown fences if present
             text = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
+
+            valid = {'buy', 'sell', 'skip'}
+            ids = {p['id'] for p in batch}
+
+            # Try 1: full valid JSON
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
-                parsed = json.loads(match.group())
-                # Validate — only keep known IDs and valid labels
-                valid = {'buy', 'sell', 'skip'}
-                ids = {p['id'] for p in batch}
-                return {k: v for k, v in parsed.items() if k in ids and v in valid}
+                try:
+                    parsed = json.loads(match.group())
+                    result = {k: v for k, v in parsed.items() if k in ids and v in valid}
+                    if result:
+                        return result
+                except json.JSONDecodeError:
+                    pass
+
+            # Try 2: salvage truncated JSON — extract complete "id": "label" pairs
+            salvaged = {}
+            for m in re.finditer(r'"([a-z0-9]+)"\s*:\s*"(buy|sell|skip)"', text):
+                if m.group(1) in ids:
+                    salvaged[m.group(1)] = m.group(2)
+            if salvaged:
+                logger.info(f'Gemini partial JSON salvaged: {len(salvaged)}/{len(batch)} posts')
+                return salvaged
+
             logger.warning(f'Gemini returned no JSON: {text[:200]}')
             break
 
