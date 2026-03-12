@@ -196,6 +196,8 @@ header {
 .modal-btn.primary { background: var(--text); color: var(--bg); }
 .modal-btn.primary:hover { background: var(--accent); }
 .modal-btn.secondary { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+.modal-btn.danger { background: #fff0ee; color: var(--accent); border: 1px solid #f5c0b0; }
+.modal-btn.danger:hover { background: var(--accent); color: #fff; }
 .event-list { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; max-height: 200px; overflow-y: auto; }
 .event-item { display: flex; align-items: center; justify-content: space-between; background: var(--bg); padding: 8px 10px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 0.63rem; gap: 8px; }
 .event-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -542,6 +544,7 @@ header {
     <textarea id="eventsTextarea" placeholder="NH7 Weekender | Pune 2026&#10;Calvin Harris India Tour&#10;AR Rahman Harmony of Hearts&#10;..."></textarea>
     <div class="modal-actions">
       <button class="modal-btn secondary" onclick="closeEventsModal()">Cancel</button>
+      <button class="modal-btn danger" onclick="clearAllEvents()">Clear All</button>
       <button class="modal-btn primary" onclick="bulkAddEvents()">Add Events</button>
     </div>
     <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:12px;">
@@ -1126,6 +1129,14 @@ async function bulkAddEvents() {
 async function deleteEvent(id) {
   await apiFetch(`/api/events/${id}`, { method: 'DELETE' });
   await loadEventsList();
+}
+
+async function clearAllEvents() {
+  if (!confirm('Clear all events? This cannot be undone.')) return;
+  try {
+    await apiFetch('/api/events', { method: 'DELETE' });
+    await loadEventsList();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 // ── BANNER + SOUND ──
