@@ -17,9 +17,22 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__, static_folder='static')
 CORS(app)
 
-db.init_db()
-
 DASHBOARD_URL = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000')
+
+PRIORITY_INTERVALS = {
+    'high':   5 * 60,
+    'medium': 15 * 60,
+    'low':    45 * 60,
+}
+
+scraper_state = {
+    'last_scraped_sub': None,
+    'last_scraped_at': None,
+    'last_scrape_ok': None,
+    'consecutive_failures': 0,
+    'next_scrape_times': {},
+    'first_boot_done': False,
+}
 
 # ── API Routes ──
 
@@ -63,12 +76,9 @@ def unmark_contacted(post_id):
 
 @app.route('/api/scrape', methods=['POST'])
 def manual_scrape():
-    """Force all due subs to be scraped now by resetting their next_scrape_times."""
-    scraper_state['next_scrape_times'] = {}  # reset all — everything becomes due
+    scraper_state['next_scrape_times'] = {}
     threading.Thread(target=scrape_due_subs, daemon=True).start()
-    return jsonify({'ok': True, 'message': 'Forced scrape of all subreddits triggered'})
-
-# ── Event Keywords ──
+    return jsonify({'ok': True, 'message': 'Forced scrape triggered'})
 
 @app.route('/api/events', methods=['GET'])
 def get_events():
@@ -88,24 +98,15 @@ def delete_event(kid):
     db.delete_event_keyword(kid)
     return jsonify({'ok': True})
 
-# ── Status Check ──
-
 @app.route('/api/status')
 def status():
     results = {}
-
-    # Reddit status — use last scrape result, never hit Reddit just for a status check
-    last_sub = scraper_state.get('last_scraped_sub')
-    last_at = scraper_state.get('last_scraped_at')
-    last_ok = scraper_state.get('last_scrape_ok', None)
     results['reddit'] = {
-        'ok': last_ok if last_ok is not None else True,  # assume ok until proven otherwise
-        'last_sub': last_sub,
-        'last_scraped_at': last_at,
-        'note': 'status from last scrape cycle, not a live check'
+        'ok': scraper_state.get('last_scrape_ok', True),
+        'last_sub': scraper_state.get('last_scraped_sub'),
+        'last_scraped_at': scraper_state.get('last_scraped_at'),
+        'first_boot_done': scraper_state['first_boot_done'],
     }
-
-    # Telegram check
     telegram_token = os.environ.get('TELEGRAM_TOKEN', '')
     telegram_chat = os.environ.get('TELEGRAM_CHAT_ID', '')
     if telegram_token:
@@ -122,26 +123,22 @@ def status():
     else:
         results['telegram'] = {'ok': False, 'error': 'TELEGRAM_TOKEN not set'}
 
-    # Claude AI check
-    anthropic_key = os.environ.get('ANTHROPIC_API_KEY', '')
-    results['claude'] = {'ok': bool(anthropic_key), 'configured': bool(anthropic_key)}
+    gemini_key = os.environ.get('GEMINI_API_KEY', '')
+    results['claude'] = {'ok': bool(gemini_key), 'configured': bool(gemini_key), 'provider': 'Gemini Flash'}
 
-    # DB check
     try:
         stats = db.get_stats()
-        results['database'] = {'ok': True, 'total_posts': stats['total']}
+        results['database'] = {'ok': True, 'total_posts': stats['total'], 'provider': 'Supabase'}
     except Exception as e:
         results['database'] = {'ok': False, 'error': str(e)}
 
-    # Scraper status
     results['scraper'] = {
         'last_scraped_sub': scraper_state['last_scraped_sub'],
         'last_scraped_at': scraper_state['last_scraped_at'],
-        'next_scrape_times': {k: round(v - time.time()) for k, v in scraper_state['next_scrape_times'].items()},
+        'first_boot_done': scraper_state['first_boot_done'],
         'intervals': PRIORITY_INTERVALS,
         'subs_total': len(db.get_subreddits())
     }
-
     return jsonify(results)
 
 @app.route('/ping')
@@ -150,7 +147,6 @@ def ping():
 
 @app.route('/api/debug/scrape')
 def debug_scrape():
-    """Test-scrape a single sub and return raw results without storing — for diagnosis."""
     sub = request.args.get('sub', 'ConcertTicketsIndia')
     extra = db.get_all_extra_keywords()
     posts = scraper.fetch_subreddit(sub, extra)
@@ -160,36 +156,52 @@ def debug_scrape():
         'posts': [{'id': p['id'], 'title': p['title'], 'type': p['post_type']} for p in posts[:10]]
     })
 
-# ── Scraper State ──
+# ── Scraper Logic ──
 
-# Priority-based intervals (safe for Reddit rate limits):
-#   High   → every 5 min  (ticket-focused subs, most valuable)
-#   Medium → every 15 min (concert community subs)
-#   Low    → every 45 min (general city/marketplace subs)
-#
-# Total max requests per hour across all subs ≈ 20 → well within Reddit limits
+def first_boot_scrape():
+    """First boot: scrape all subs with pagination and 10s gaps to build DB fast."""
+    logger.info('=== FIRST BOOT SCRAPE: fetching all subs with pagination ===')
+    subs = db.get_subreddits()
+    extra_keywords = db.get_all_extra_keywords()
+    total = 0
+    for sub_obj in subs:
+        name = sub_obj['name']
+        try:
+            logger.info(f'First boot: r/{name} (fast mode, up to 5 pages)')
+            posts = scraper.fetch_subreddit(name, extra_keywords, fast_mode=True)
+            for post in posts:
+                db.upsert_post(post)
+            total += len(posts)
+            logger.info(f'First boot: r/{name} → {len(posts)} posts. Total: {total}')
+            scraper_state['last_scraped_sub'] = name
+            scraper_state['last_scraped_at'] = datetime.utcnow().isoformat()
+            scraper_state['last_scrape_ok'] = True
+            priority = sub_obj.get('priority', 'medium')
+            scraper_state['next_scrape_times'][name] = time.time() + PRIORITY_INTERVALS[priority]
+        except Exception as e:
+            logger.error(f'First boot error r/{name}: {e}')
+        time.sleep(10)
 
-PRIORITY_INTERVALS = {
-    'high':   5 * 60,   # 300s
-    'medium': 15 * 60,  # 900s
-    'low':    45 * 60,  # 2700s
-}
+    logger.info(f'=== FIRST BOOT COMPLETE: {total} posts across {len(subs)} subs ===')
+    scraper_state['first_boot_done'] = True
 
-scraper_state = {
-    'last_scraped_sub': None,
-    'last_scraped_at': None,
-    'last_scrape_ok': None,
-    'consecutive_failures': 0,
-    'next_scrape_times': {},  # sub_name -> next scrape unix timestamp
-}
+    try:
+        unnotified = db.get_unnotified_posts()
+        logger.info(f'Sending {len(unnotified)} Telegram alerts...')
+        for post in unnotified:
+            bot.send_post_alert(post)
+            db.mark_notified(post['id'])
+            time.sleep(0.3)
+    except Exception as e:
+        logger.error(f'First boot notification error: {e}')
+
 
 def scrape_due_subs():
-    """Scrape all subreddits that are due based on their priority interval."""
+    """Normal priority scrape — fires only what's due based on interval."""
     try:
-        subs = db.get_subreddits()  # list of {name, priority}
+        subs = db.get_subreddits()
         if not subs:
             return
-
         now = time.time()
         extra_keywords = db.get_all_extra_keywords()
         next_times = scraper_state['next_scrape_times']
@@ -199,15 +211,13 @@ def scrape_due_subs():
             priority = sub_obj.get('priority', 'medium')
             interval = PRIORITY_INTERVALS.get(priority, PRIORITY_INTERVALS['medium'])
 
-            # Due if never scraped or past its interval
             if now >= next_times.get(name, 0):
                 logger.info(f'Scraping r/{name} [{priority}]')
                 try:
-                    posts = scraper.fetch_subreddit(name, extra_keywords)
+                    posts = scraper.fetch_subreddit(name, extra_keywords, fast_mode=False)
                     for post in posts:
                         db.upsert_post(post)
 
-                    # Notify new posts
                     unnotified = db.get_unnotified_posts()
                     for post in unnotified:
                         bot.send_post_alert(post)
@@ -225,9 +235,8 @@ def scrape_due_subs():
                     scraper_state['last_scrape_ok'] = False
                     scraper_state['consecutive_failures'] += 1
                     logger.error(f'Error scraping r/{name}: {e}')
-                    next_times[name] = now + 60  # retry in 1 min on error
+                    next_times[name] = now + 60
 
-                # Small gap between each sub to avoid burst
                 time.sleep(1)
 
     except Exception as e:
@@ -235,21 +244,28 @@ def scrape_due_subs():
 
 
 def scrape_loop():
-    """
-    Checks every 30 seconds which subs are due.
-    Runs each due sub sequentially with small gaps — never blocks the check timer.
-    """
-    time.sleep(10)  # let app fully boot first
+    time.sleep(10)  # let app fully boot
+    try:
+        stats = db.get_stats()
+        if stats['total'] == 0:
+            logger.info('Empty DB — running first boot scrape')
+            first_boot_scrape()
+        else:
+            logger.info(f'DB has {stats["total"]} posts — skipping first boot')
+            scraper_state['first_boot_done'] = True
+    except Exception as e:
+        logger.error(f'First boot check failed: {e}')
+        scraper_state['first_boot_done'] = True
+
     while True:
         try:
             scrape_due_subs()
         except Exception as e:
             logger.error(f'scrape_loop error: {e}')
-        time.sleep(30)  # check every 30s, only fires what's actually due
+        time.sleep(30)
 
 
 def self_ping_loop():
-    """Ping self every 10 minutes to prevent Render free tier sleeping."""
     time.sleep(30)
     while True:
         try:
@@ -260,7 +276,6 @@ def self_ping_loop():
 
 
 def scheduler_loop():
-    """Daily summary at 8am, weekly stats Monday 9am."""
     last_daily = None
     last_weekly = None
     while True:
@@ -285,12 +300,15 @@ def start_background_threads():
     threading.Thread(target=scrape_loop, daemon=True).start()
     threading.Thread(target=self_ping_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    logger.info('Background threads started. Priority scraping: high=5min, medium=15min, low=45min.')
+    logger.info('Background threads started.')
 
+
+# ── CRITICAL: init on module load so gunicorn picks it up ──
+# (gunicorn imports app.py as a module, never calls __main__)
+db.init_db()
+start_background_threads()
 
 if __name__ == '__main__':
-    db.init_db()
-    start_background_threads()
     if os.environ.get('TELEGRAM_TOKEN'):
         time.sleep(2)
         bot.send_startup_message(DASHBOARD_URL)
