@@ -558,7 +558,8 @@ const API = '';
 let activeFilter = 'all';
 let hideContacted = false;
 let allPosts = [];
-let knownIds = new Set(JSON.parse(localStorage.getItem('rt_known_ids') || '[]'));
+let knownIds = new Set();
+try { knownIds = new Set(JSON.parse(localStorage.getItem('rt_known_ids') || '[]')); } catch(e) {}
 let globalSubCounts = {};
 let lastStatusData = {};
 
@@ -698,7 +699,7 @@ async function loadPosts(forceRefresh = false) {
     }
     
     newPosts.forEach(p => knownIds.add(p.id));
-    localStorage.setItem('rt_known_ids', JSON.stringify([...knownIds].slice(-2000)));
+    try { localStorage.setItem('rt_known_ids', JSON.stringify([...knownIds].slice(-2000))); } catch(e) {}
     
     renderPosts();
     document.getElementById('lastRefreshTime').textContent = 'Updated ' + new Date().toLocaleTimeString();
