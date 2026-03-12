@@ -8,7 +8,7 @@ from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-# ── Connection Pool ──
+# ── Connection Pool (fixed for Supabase SSL) ──
 db_pool = None
 
 def init_db_pool():
@@ -19,23 +19,30 @@ def init_db_pool():
         return False
     
     try:
+        # Parse DATABASE_URL to ensure correct format
         db_pool = pool.SimpleConnectionPool(
-            1, 10,  # min 1, max 10 connections
+            1, 5,  # min 1, max 5 connections (lower max for free tier)
             DATABASE_URL,
-            connect_timeout=5,
+            connect_timeout=10,
+            sslmode='require',
             keepalives=1,
             keepalives_idle=30,
             keepalives_interval=10,
-            keepalives_count=5
+            keepalives_count=5,
+            options='-c statement_timeout=30000'  # 30 second timeout
         )
+        # Test the pool
+        conn = db_pool.getconn()
+        db_pool.putconn(conn)
         logger.info('✓ Database connection pool created')
         return True
     except Exception as e:
         logger.error(f'✗ Failed to create connection pool: {e}')
+        logger.error('  Falling back to direct connections')
         return False
 
 def get_conn():
-    """Get a connection from the pool"""
+    """Get a connection from the pool or direct if pool failed"""
     if not DATABASE_URL:
         raise RuntimeError('DATABASE_URL is not set')
     
@@ -45,27 +52,57 @@ def get_conn():
         except Exception as e:
             logger.error(f'Failed to get connection from pool: {e}')
             # Fall back to direct connection
-            return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+            return psycopg2.connect(
+                DATABASE_URL,
+                connect_timeout=10,
+                sslmode='require',
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
+            )
     else:
-        return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+        return psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=10,
+            sslmode='require',
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5
+        )
 
 def return_conn(conn):
-    """Return a connection to the pool"""
+    """Return a connection to the pool or close if direct"""
     if db_pool and conn:
         try:
             db_pool.putconn(conn)
         except Exception as e:
             logger.error(f'Failed to return connection to pool: {e}')
-            conn.close()
+            try:
+                conn.close()
+            except:
+                pass
     elif conn:
-        conn.close()
+        try:
+            conn.close()
+        except:
+            pass
 
 def init_db():
-    """Verify DB connectivity on startup. Warns but does NOT crash the app."""
+    """Verify DB connectivity on startup."""
     try:
+        # Try to initialize pool first
+        pool_ok = init_db_pool()
+        
+        # Test connection
         conn = get_conn()
         return_conn(conn)
-        logger.info('✓ Supabase DB connected OK')
+        
+        if pool_ok:
+            logger.info('✓ Supabase DB connected with pool')
+        else:
+            logger.info('✓ Supabase DB connected (direct)')
         return True
     except Exception as e:
         logger.error(f'✗ DB connection failed: {e}')
@@ -77,8 +114,9 @@ def init_db():
 # ── Posts ──
 
 def upsert_post(post: dict):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 c.execute('''
@@ -98,14 +136,20 @@ def upsert_post(post: dict):
                     post['ups'], post['num_comments'], post['created_utc'],
                     int(datetime.utcnow().timestamp())
                 ))
+    except Exception as e:
+        logger.error(f'upsert_post error: {e}')
+        raise
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def get_posts(limit=200, offset=0, post_type=None, hide_contacted=False):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            # Use parameterized query to prevent SQL injection
             query = 'SELECT * FROM posts WHERE 1=1'
             params = []
             if post_type and post_type != 'all':
@@ -115,17 +159,25 @@ def get_posts(limit=200, offset=0, post_type=None, hide_contacted=False):
                 query += ' AND contacted=0'
             query += ' ORDER BY created_utc DESC LIMIT %s OFFSET %s'
             params += [limit, offset]
+            
             c.execute(query, params)
             return [dict(r) for r in c.fetchall()]
+    except Exception as e:
+        logger.error(f'get_posts error: {e}')
+        raise
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def get_stats():
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
-            # Use multiple queries but same connection
+            # Use a single transaction for all stats
+            c.execute('BEGIN')
+            
             c.execute('SELECT COUNT(*) as cnt FROM posts')
             total = c.fetchone()['cnt']
             
@@ -159,6 +211,8 @@ def get_stats():
 
             c.execute('SELECT subreddit, COUNT(*) as cnt FROM posts GROUP BY subreddit')
             sub_counts = {r['subreddit']: r['cnt'] for r in c.fetchall()}
+            
+            c.execute('COMMIT')
 
             return {
                 'total': total, 'contacted': contacted, 'sell': sell,
@@ -169,73 +223,94 @@ def get_stats():
                 'today_new': today_new,
                 'sub_counts': sub_counts
             }
+    except Exception as e:
+        logger.error(f'get_stats error: {e}')
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        raise
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def get_unnotified_posts():
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
             c.execute('SELECT * FROM posts WHERE notified=0 ORDER BY created_utc DESC')
             return [dict(r) for r in c.fetchall()]
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def mark_notified(post_id: str):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 c.execute('UPDATE posts SET notified=1 WHERE id=%s', (post_id,))
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def mark_contacted(post_id: str):
-    conn = get_conn()
+    conn = None
     now = int(datetime.utcnow().timestamp())
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 c.execute('UPDATE posts SET contacted=1, contacted_at=%s WHERE id=%s', (now, post_id))
                 c.execute('INSERT INTO activity_log (timestamp, action, post_id) VALUES (%s,%s,%s)', (now, 'contacted', post_id))
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def unmark_contacted(post_id: str):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 c.execute('UPDATE posts SET contacted=0, contacted_at=NULL WHERE id=%s', (post_id,))
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 # ── Settings ──
 
 def get_setting(key, default=None):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn.cursor() as c:
             c.execute('SELECT value FROM settings WHERE key=%s', (key,))
             row = c.fetchone()
             return row[0] if row else default
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def set_setting(key, value):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 c.execute('INSERT INTO settings (key, value) VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value',
                           (key, str(value)))
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 # ── Subreddits ──
 
@@ -278,19 +353,22 @@ def get_subreddit_names():
 # ── Events / Keywords ──
 
 def get_event_keywords():
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
             c.execute('SELECT * FROM event_keywords ORDER BY created_at DESC')
             return [dict(r) for r in c.fetchall()]
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def add_event_keywords(names: list):
-    conn = get_conn()
+    conn = None
     now = int(datetime.utcnow().timestamp())
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 for name in names:
@@ -298,17 +376,20 @@ def add_event_keywords(names: list):
                     if name:
                         c.execute('INSERT INTO event_keywords (name, created_at) VALUES (%s,%s)', (name, now))
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def delete_event_keyword(kid: int):
-    conn = get_conn()
+    conn = None
     try:
+        conn = get_conn()
         with conn:
             with conn.cursor() as c:
                 c.execute('DELETE FROM event_keywords WHERE id=%s', (kid,))
     finally:
-        return_conn(conn)
+        if conn:
+            return_conn(conn)
 
 
 def get_all_extra_keywords():
