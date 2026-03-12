@@ -73,12 +73,31 @@ header {
 .sub-remove { opacity: 0; font-size: 0.75rem; color: var(--muted); cursor: pointer; padding: 2px 6px; flex-shrink: 0; }
 .sub-item:hover .sub-remove { opacity: 1; }
 .sub-remove:hover { color: var(--accent); }
+
+/* Tier sections */
+.tier-section { margin-bottom: 4px; }
+.tier-header { font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 6px 20px 4px; display: flex; align-items: center; gap: 6px; }
+.tier-header .tier-hint { color: var(--muted); font-size: 0.52rem; margin-left: auto; }
+.tier-header.high { color: #c84b2f; }
+.tier-header.medium { color: #8a6d3b; }
+.tier-header.low { color: #2a7a4b; }
+
+/* Drag & drop */
+.sub-item { cursor: grab; }
+.sub-item:active { cursor: grabbing; }
+.sub-item.dragging { opacity: 0.4; background: var(--surface2); }
+.sub-item.drag-over { border-top: 2px solid var(--accent); }
+.sub-list.drag-target { min-height: 28px; background: #f9f7f3; border-radius: 4px; transition: background 0.15s; }
+.sub-list.drag-over-list { background: #f0ede6; }
+
+.priority-select-row { display: flex; gap: 6px; }
+.priority-select { flex: 1; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 7px 8px; border-radius: 4px; outline: none; cursor: pointer; }
 .add-sub-form { padding: 12px 20px; border-top: 1px solid var(--border); margin-top: auto; }
 .add-sub-input { width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 4px; outline: none; margin-bottom: 6px; }
 .add-sub-input:focus { border-color: var(--accent); }
 .add-sub-input::placeholder { color: var(--muted); }
-.add-sub-btn { width: 100%; background: var(--text); color: var(--bg); border: none; font-family: 'Syne', sans-serif; font-size: 0.76rem; font-weight: 600; padding: 8px; border-radius: 4px; cursor: pointer; }
-.add-sub-btn:hover { background: var(--accent); }
+.add-sub-btn { background: var(--text); color: var(--bg); border: none; font-family: 'Syne', sans-serif; font-size: 0.76rem; font-weight: 600; padding: 8px 12px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.add-sub-btn:hover, .add-sub-btn:active { background: var(--accent); }
 
 /* ── FEED ── */
 .feed { padding: 16px 20px; overflow-y: auto; }
@@ -236,6 +255,18 @@ header {
 .mobile-add-sub input:focus { border-color: var(--accent); }
 .mobile-add-sub button { background: var(--text); color: var(--bg); border: none; font-family: 'Syne', sans-serif; font-size: 0.76rem; font-weight: 700; padding: 10px 16px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 
+/* Mobile tier sections in subs drawer */
+.mobile-tier-section { margin-bottom: 8px; }
+.mobile-tier-header { font-family: 'JetBrains Mono', monospace; font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; padding: 8px 0 4px; display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 2px; }
+.mobile-tier-header .tier-hint { color: var(--muted); font-size: 0.52rem; margin-left: auto; }
+.mobile-tier-header.high { color: #c84b2f; }
+.mobile-tier-header.medium { color: #8a6d3b; }
+.mobile-tier-header.low { color: #2a7a4b; }
+.mobile-sub-tier-list { min-height: 20px; }
+.mobile-sub-tier-list.touch-drag-over { background: #f0ede6; border-radius: 6px; }
+.mobile-sub-item { touch-action: none; }
+.mobile-sub-item.touch-dragging { opacity: 0.4; }
+
 /* Mobile status indicators in stats drawer */
 .mobile-status-row { display: flex; flex-direction: column; gap: 8px; }
 .mobile-status-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg); border-radius: 6px; border: 1px solid var(--border); }
@@ -311,10 +342,28 @@ header {
   <!-- Desktop sidebar -->
   <aside class="sidebar">
     <div class="sidebar-title">Subreddits</div>
-    <ul class="sub-list" id="subList"></ul>
+    <div class="tier-section" id="tierHigh">
+      <div class="tier-header high">🔴 High <span class="tier-hint">5 min</span></div>
+      <ul class="sub-list" id="subListHigh" data-priority="high"></ul>
+    </div>
+    <div class="tier-section" id="tierMedium">
+      <div class="tier-header medium">🟡 Medium <span class="tier-hint">15 min</span></div>
+      <ul class="sub-list" id="subListMedium" data-priority="medium"></ul>
+    </div>
+    <div class="tier-section" id="tierLow">
+      <div class="tier-header low">🟢 Low <span class="tier-hint">45 min</span></div>
+      <ul class="sub-list" id="subListLow" data-priority="low"></ul>
+    </div>
     <div class="add-sub-form">
       <input class="add-sub-input" type="text" id="newSubInput" placeholder="r/subredditname" />
-      <button class="add-sub-btn" onclick="addSubreddit()">+ Add Subreddit</button>
+      <div class="priority-select-row">
+        <select class="priority-select" id="newSubPriority">
+          <option value="high">🔴 High</option>
+          <option value="medium" selected>🟡 Medium</option>
+          <option value="low">🟢 Low</option>
+        </select>
+        <button class="add-sub-btn" onclick="addSubreddit()">+ Add</button>
+      </div>
     </div>
   </aside>
 
@@ -405,9 +454,25 @@ header {
     <span class="drawer-close" onclick="closeDrawer('subsDrawer')">✕</span>
   </div>
   <div class="drawer-body">
-    <div id="mobileSubList"></div>
+    <div class="mobile-tier-section">
+      <div class="mobile-tier-header high">🔴 High <span class="tier-hint">5 min</span></div>
+      <div class="mobile-sub-tier-list" id="mSubListHigh" data-priority="high"></div>
+    </div>
+    <div class="mobile-tier-section">
+      <div class="mobile-tier-header medium">🟡 Medium <span class="tier-hint">15 min</span></div>
+      <div class="mobile-sub-tier-list" id="mSubListMedium" data-priority="medium"></div>
+    </div>
+    <div class="mobile-tier-section">
+      <div class="mobile-tier-header low">🟢 Low <span class="tier-hint">45 min</span></div>
+      <div class="mobile-sub-tier-list" id="mSubListLow" data-priority="low"></div>
+    </div>
     <div class="mobile-add-sub">
-      <input type="text" id="mobileSubInput" placeholder="r/subredditname" />
+      <input type="text" id="mobileSubInput" placeholder="r/subredditname" style="flex:1" />
+      <select id="mobileSubPriority" style="font-family:'JetBrains Mono',monospace;font-size:0.65rem;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px 8px;border-radius:6px;outline:none;cursor:pointer;">
+        <option value="high">🔴</option>
+        <option value="medium" selected>🟡</option>
+        <option value="low">🟢</option>
+      </select>
       <button onclick="addSubredditMobile()">+ Add</button>
     </div>
   </div>
@@ -596,6 +661,7 @@ async function loadStats() {
 }
 
 // ── SUBREDDITS ──
+// currentSubs: array of {name, priority}
 let currentSubs = [];
 
 async function loadSubreddits() {
@@ -604,21 +670,48 @@ async function loadSubreddits() {
 }
 
 function renderSubList() {
-  // Desktop
-  document.getElementById('subList').innerHTML = currentSubs.map((sub, i) => `
-    <li class="sub-item">
-      <span class="sub-name">r/${sub}</span>
-      <span class="sub-count">${globalSubCounts[sub] || 0}</span>
-      <span class="sub-remove" onclick="removeSub(${i})">✕</span>
-    </li>`).join('');
+  const tiers = ['high', 'medium', 'low'];
+  const CAP = t => t.charAt(0).toUpperCase() + t.slice(1);
 
-  // Mobile drawer
-  document.getElementById('mobileSubList').innerHTML = currentSubs.map((sub, i) => `
-    <div class="mobile-sub-item">
-      <span class="mobile-sub-name">r/${sub}</span>
-      <span class="mobile-sub-count">${globalSubCounts[sub] || 0}</span>
-      <span class="mobile-sub-del" onclick="removeSub(${i}); renderSubList();">✕</span>
-    </div>`).join('');
+  // ── Desktop sidebar ──
+  tiers.forEach(priority => {
+    const list = document.getElementById('subList' + CAP(priority));
+    if (!list) return;
+    const subs = currentSubs.filter(s => s.priority === priority);
+    list.innerHTML = subs.map(sub => {
+      const idx = currentSubs.findIndex(s => s.name === sub.name);
+      return `<li class="sub-item" draggable="true" data-name="${sub.name}" data-priority="${priority}"
+        ondragstart="dragStart(event)" ondragover="dragOver(event)" ondrop="drop(event,this)" ondragleave="dragLeave(event)">
+        <span style="font-size:0.7rem;opacity:0.35;cursor:grab;margin-right:2px">⠿</span>
+        <span class="sub-name">r/${sub.name}</span>
+        <span class="sub-count">${globalSubCounts[sub.name] || 0}</span>
+        <span class="sub-remove" onclick="removeSub(${idx})">✕</span>
+      </li>`;
+    }).join('');
+    list.ondragover = e => { e.preventDefault(); list.classList.add('drag-over-list'); };
+    list.ondragleave = () => list.classList.remove('drag-over-list');
+    list.ondrop = e => { e.preventDefault(); list.classList.remove('drag-over-list'); dropOnList(e, priority); };
+  });
+
+  // ── Mobile drawer — tier-grouped with touch drag ──
+  tiers.forEach(priority => {
+    const mList = document.getElementById('mSubList' + CAP(priority));
+    if (!mList) return;
+    const subs = currentSubs.filter(s => s.priority === priority);
+    mList.innerHTML = subs.map(sub => {
+      const idx = currentSubs.findIndex(s => s.name === sub.name);
+      return `<div class="mobile-sub-item" data-name="${sub.name}" data-priority="${priority}"
+        ontouchstart="touchDragStart(event,this)" ontouchmove="touchDragMove(event)" ontouchend="touchDragEnd(event)">
+        <span style="font-size:1rem;opacity:0.4;margin-right:4px;touch-action:none">⠿</span>
+        <span class="mobile-sub-name">r/${sub.name}</span>
+        <span class="mobile-sub-count">${globalSubCounts[sub.name] || 0}</span>
+        <span class="mobile-sub-del" onclick="removeSub(${idx})">✕</span>
+      </div>`;
+    }).join('') || `<div style="font-family:'JetBrains Mono',monospace;font-size:0.6rem;color:var(--muted);padding:8px 0">None — drag here to add</div>`;
+
+    // Touch drop zone on the tier list container itself
+    mList.ontouchend = null; // handled by global touchDragEnd
+  });
 }
 
 async function saveSubreddits(subs) {
@@ -626,30 +719,158 @@ async function saveSubreddits(subs) {
 }
 
 async function addSubreddit() {
-  let val = document.getElementById('newSubInput').value.trim().replace(/^r\//,'').replace(/\//g,'');
-  if (!val || currentSubs.includes(val)) return;
-  currentSubs.push(val);
+  let val = document.getElementById('newSubInput').value.trim().replace(/^r\//, '').replace(/\//g, '');
+  const priority = document.getElementById('newSubPriority').value;
+  if (!val || currentSubs.find(s => s.name === val)) return;
+  currentSubs.push({ name: val, priority });
   await saveSubreddits(currentSubs);
   renderSubList();
   document.getElementById('newSubInput').value = '';
-  triggerScrape();
 }
 
 async function addSubredditMobile() {
-  let val = document.getElementById('mobileSubInput').value.trim().replace(/^r\//,'').replace(/\//g,'');
-  if (!val || currentSubs.includes(val)) return;
-  currentSubs.push(val);
+  let val = document.getElementById('mobileSubInput').value.trim().replace(/^r\//, '').replace(/\//g, '');
+  const priority = document.getElementById('mobileSubPriority') ? document.getElementById('mobileSubPriority').value : 'medium';
+  if (!val || currentSubs.find(s => s.name === val)) return;
+  currentSubs.push({ name: val, priority });
   await saveSubreddits(currentSubs);
   renderSubList();
   document.getElementById('mobileSubInput').value = '';
-  triggerScrape();
 }
 
 async function removeSub(idx) {
-  if (!confirm(`Remove r/${currentSubs[idx]}?`)) return;
+  if (!confirm('Remove r/' + currentSubs[idx].name + '?')) return;
   currentSubs.splice(idx, 1);
   await saveSubreddits(currentSubs);
   renderSubList();
+}
+
+// ── DRAG & DROP (Desktop — HTML5 drag API) ──
+let draggedName = null;
+
+function dragStart(e) {
+  draggedName = e.currentTarget.dataset.name;
+  setTimeout(() => e.currentTarget.classList.add('dragging'), 0);
+  e.dataTransfer.effectAllowed = 'move';
+}
+function dragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+function dragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+function drop(e, targetEl) {
+  e.preventDefault(); e.stopPropagation();
+  targetEl.classList.remove('drag-over');
+  document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+  if (!draggedName || draggedName === targetEl.dataset.name) return;
+  const newPriority = targetEl.dataset.priority;
+  const fromIdx = currentSubs.findIndex(s => s.name === draggedName);
+  const toIdx = currentSubs.findIndex(s => s.name === targetEl.dataset.name);
+  if (fromIdx === -1 || toIdx === -1) return;
+  const [moved] = currentSubs.splice(fromIdx, 1);
+  moved.priority = newPriority;
+  const newTo = currentSubs.findIndex(s => s.name === targetEl.dataset.name);
+  currentSubs.splice(newTo, 0, moved);
+  saveSubreddits(currentSubs);
+  renderSubList();
+  draggedName = null;
+}
+function dropOnList(e, priority) {
+  if (!draggedName) return;
+  const sub = currentSubs.find(s => s.name === draggedName);
+  if (sub && sub.priority !== priority) { sub.priority = priority; saveSubreddits(currentSubs); renderSubList(); }
+  draggedName = null;
+}
+
+// ── TOUCH DRAG & DROP (Mobile) ──
+let touchDragEl = null;
+let touchDragName = null;
+let touchDragPriority = null;
+let touchClone = null;
+let touchOffsetX = 0;
+let touchOffsetY = 0;
+
+function touchDragStart(e, el) {
+  // Don't start drag if tapping the delete button
+  if (e.target.classList.contains('mobile-sub-del')) return;
+  touchDragEl = el;
+  touchDragName = el.dataset.name;
+  touchDragPriority = el.dataset.priority;
+
+  const touch = e.touches[0];
+  const rect = el.getBoundingClientRect();
+  touchOffsetX = touch.clientX - rect.left;
+  touchOffsetY = touch.clientY - rect.top;
+
+  // Create floating clone
+  touchClone = el.cloneNode(true);
+  touchClone.style.cssText = `
+    position: fixed; z-index: 9999; pointer-events: none; opacity: 0.85;
+    width: ${rect.width}px; background: var(--surface);
+    border: 1px solid var(--accent); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+    left: ${touch.clientX - touchOffsetX}px;
+    top: ${touch.clientY - touchOffsetY}px;
+  `;
+  document.body.appendChild(touchClone);
+  el.classList.add('touch-dragging');
+}
+
+function touchDragMove(e) {
+  if (!touchClone) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  touchClone.style.left = (touch.clientX - touchOffsetX) + 'px';
+  touchClone.style.top = (touch.clientY - touchOffsetY) + 'px';
+
+  // Highlight drop zone
+  document.querySelectorAll('.mobile-sub-tier-list').forEach(z => z.classList.remove('touch-drag-over'));
+  const el = document.elementFromPoint(touch.clientX, touch.clientY);
+  const zone = el?.closest('.mobile-sub-tier-list');
+  if (zone) zone.classList.add('touch-drag-over');
+}
+
+function touchDragEnd(e) {
+  if (!touchClone) return;
+  const touch = e.changedTouches[0];
+
+  // Clean up visual
+  touchClone.remove(); touchClone = null;
+  document.querySelectorAll('.touch-dragging').forEach(el => el.classList.remove('touch-dragging'));
+  document.querySelectorAll('.touch-drag-over').forEach(el => el.classList.remove('touch-drag-over'));
+
+  // Find drop target
+  const el = document.elementFromPoint(touch.clientX, touch.clientY);
+  const zone = el?.closest('.mobile-sub-tier-list');
+  const targetItem = el?.closest('.mobile-sub-item');
+
+  if (!touchDragName) return;
+  const sub = currentSubs.find(s => s.name === touchDragName);
+  if (!sub) return;
+
+  if (targetItem && targetItem.dataset.name !== touchDragName) {
+    // Drop on another item — reorder + change priority
+    const newPriority = targetItem.dataset.priority;
+    const fromIdx = currentSubs.findIndex(s => s.name === touchDragName);
+    const toIdx = currentSubs.findIndex(s => s.name === targetItem.dataset.name);
+    if (fromIdx !== -1 && toIdx !== -1) {
+      const [moved] = currentSubs.splice(fromIdx, 1);
+      moved.priority = newPriority;
+      const newTo = currentSubs.findIndex(s => s.name === targetItem.dataset.name);
+      currentSubs.splice(newTo, 0, moved);
+      saveSubreddits(currentSubs);
+      renderSubList();
+    }
+  } else if (zone && zone.dataset.priority && zone.dataset.priority !== sub.priority) {
+    // Drop on empty tier zone — just change priority
+    sub.priority = zone.dataset.priority;
+    saveSubreddits(currentSubs);
+    renderSubList();
+  }
+
+  touchDragEl = null; touchDragName = null; touchDragPriority = null;
 }
 
 document.getElementById('newSubInput').addEventListener('keydown', e => { if(e.key==='Enter') addSubreddit(); });
